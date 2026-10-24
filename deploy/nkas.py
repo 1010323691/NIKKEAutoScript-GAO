@@ -132,7 +132,9 @@ class NKASManager(DeployConfig):
         Yields:
             str, str, int: executable_path, process_name, process_id
         """
-        excluded_pids = {self.self_pid, *(excluded_pids or set())}
+        # A venv python.exe on Windows is a launcher that spawns the real interpreter as a child,
+        # so the parent shares PythonExecutable's path; killing it would take this process down too.
+        excluded_pids = {self.self_pid, os.getppid(), *(excluded_pids or set())}
         rows = self.iter_process_by_snapshot(name, allowed_paths, excluded_pids)
         if rows is not None:
             yield from rows
