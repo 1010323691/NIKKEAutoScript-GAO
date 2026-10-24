@@ -38,6 +38,8 @@ class Button(Resource):
 
         # 非模板位置，例如'确认'并不是固定的
         self._button_offset = None
+        # match_with_scale 命中时的模板缩放比例
+        self.match_scale = 1.0
         self._match_init = False
         self._match_binary_init = False
         self._match_luma_init = False
@@ -200,6 +202,7 @@ class Button(Resource):
             h, w = self.area[3] - self.area[1], self.area[2] - self.area[0]
             bottom_right = (best_loc[0] + w, best_loc[1] + h)
             self._button_offset = (best_loc[0], best_loc[1], bottom_right[0], bottom_right[1])
+            self.match_scale = best_scale
 
         logger.debug(
             f'Button: {self.name}, best_similarity: {best_similarity:.3f}, '
