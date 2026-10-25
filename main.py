@@ -14,6 +14,7 @@ from module.config.utils import deep_get, deep_set
 from module.exception import (
     AccountError,
     CaptchaRequired,
+    GameClickNoResponseError,
     GameNotRunningError,
     GamePageUnknownError,
     GameServerUnderMaintenance,
@@ -176,6 +177,18 @@ class NikkeAutoScript:
             logger.warning(e)
             self.config.task_call('Restart')
             return False
+        except GameClickNoResponseError as e:
+            logger.error(e)
+            self.save_error_log()
+            # 重启与回主页不是可推迟的调度任务，按卡死处理
+            if command in ('restart', 'goto_main'):
+                logger.warning(f'Game stuck, {self.device.package} will be restarted in 10 seconds')
+                self.config.task_call('Restart')
+                self.device.sleep(10)
+                return False
+            logger.warning(f'Task `{command}` skipped, the feature may be locked on this account')
+            self.config.task_delay(server_update=True)
+            return True
         except (GameStuckError, GameTooManyClickError, ScreenshotError) as e:
             logger.error(e)
             self.save_error_log()

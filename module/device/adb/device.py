@@ -13,6 +13,7 @@ from module.device.adb.app_control import AppControl
 from module.device.adb.control import Control
 from module.device.adb.env import IS_WINDOWS
 from module.device.adb.screenshot import Screenshot, ScreenshotSizeError
+from module.device.click_response import ClickResponse
 from module.exception import (
     EmulatorNotRunningError,
     GameNotRunningError,
@@ -24,7 +25,7 @@ from module.logger import logger
 from module.ocr.models import OCR_MODEL
 
 
-class Device(Screenshot, Control, AppControl):
+class Device(ClickResponse, Screenshot, Control, AppControl):
     get_location = OCR_MODEL.get_location
 
     # 尝试检测的 Button 集合
@@ -477,7 +478,13 @@ class Device(Screenshot, Control, AppControl):
             'serial': self.serial,
             'display_id': self._virtual_display_id or 0,
         })
+        self.click_response_check()
         return self.image
+
+    def click(self, button: Button, click_offset=0, control_check=True, random_offset=None):
+        super().click(button, click_offset=click_offset, control_check=control_check, random_offset=random_offset)
+        if control_check:
+            self.click_response_record(button)
 
     def handle_control_check(self, button: Button):
         """
@@ -540,6 +547,7 @@ class Device(Screenshot, Control, AppControl):
             清空点击过的button
         """
         self.click_record.clear()
+        self.click_response_clear()
 
     def stuck_record_check(self):
         """
@@ -595,6 +603,7 @@ class Device(Screenshot, Control, AppControl):
 
         self.click_record_check = empty_function
         self.stuck_record_check = empty_function
+        self.click_response_check = empty_function
 
     def stuck_record_add(self, button: Button):
         """

@@ -1,5 +1,5 @@
 from module.base.timer import Timer
-from module.exception import GameStuckError, GameTooManyClickError, RequestHumanTakeover
+from module.exception import GameClickNoResponseError, GameStuckError, GameTooManyClickError, RequestHumanTakeover
 from module.handler.assets import *
 from module.logger import logger
 from module.ui.assets import *
@@ -127,7 +127,7 @@ class LoginHandler(UI):
             try:
                 self._handle_app_login()
                 return True
-            except (GameTooManyClickError, GameStuckError) as e:
+            except (GameTooManyClickError, GameStuckError, GameClickNoResponseError) as e:
                 logger.warning(e)
                 self.device.app_stop()
                 self.device.app_start()

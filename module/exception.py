@@ -26,6 +26,11 @@ class GameStuckError(Exception):
     pass
 
 
+class GameClickNoResponseError(Exception):
+    # 点击同一按钮反复弹出未解锁提示横幅，多见于小号，调度器跳过当前任务
+    pass
+
+
 class GameSystemError(Exception):
     pass
 

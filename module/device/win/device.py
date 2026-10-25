@@ -4,6 +4,7 @@ from datetime import time
 from module.base.button import Button
 from module.base.timer import Timer
 from module.base.utils import publish_preview_frame
+from module.device.click_response import ClickResponse
 from module.device.win.app_control import AppControl
 from module.device.win.automation import Automation
 from module.exception import (
@@ -15,7 +16,7 @@ from module.exception import (
 from module.logger import logger
 
 
-class Device(AppControl, Automation):
+class Device(ClickResponse, AppControl, Automation):
     # 尝试检测的 Button 集合
     detect_record = set()
     # 点击过的 Button 队列
@@ -61,7 +62,13 @@ class Device(AppControl, Automation):
         super().screenshot()
         self.image = self.current_window.image
         publish_preview_frame(self.image)
+        self.click_response_check()
         return self.image
+
+    def click(self, button: Button, click_offset=0, action='click', random_offset=None):
+        super().click(button, click_offset=click_offset, action=action, random_offset=random_offset)
+        if action == 'click':
+            self.click_response_record(button)
 
     def handle_control_check(self, button: Button):
         """
@@ -124,6 +131,7 @@ class Device(AppControl, Automation):
         清空点击过的button
         """
         self.click_record.clear()
+        self.click_response_clear()
 
     def stuck_record_check(self):
         """
@@ -180,6 +188,7 @@ class Device(AppControl, Automation):
 
         self.click_record_check = empty_function
         self.stuck_record_check = empty_function
+        self.click_response_check = empty_function
 
     def stuck_record_add(self, button: Button):
         """
