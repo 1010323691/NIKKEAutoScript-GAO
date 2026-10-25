@@ -70,7 +70,8 @@
       "ScreenshotMethod": "pyautogui",
       "ScreenshotInterval": 0.3,
       "ControlScheme": "pyautogui",
-      "MoveBackend": "driver"
+      "MoveBackend": "driver",
+      "ClickMoveDelay": 1.0
     },
     "PCClient": {
       "Screens": false,

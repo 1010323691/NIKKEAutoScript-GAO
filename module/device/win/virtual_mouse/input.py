@@ -287,6 +287,7 @@ class VirtualMouseInput(Input):
             if not self._move_to(x, y):
                 self._checked(False, f'move ({int(x)}, {int(y)})')
                 return
+            self._wait_after_move()
             # 一次完整操作成功后才清零，避免定位成功掩盖连续按键失败。
             if not self._press_hold_release(CLICK_HOLD):
                 return
@@ -297,6 +298,7 @@ class VirtualMouseInput(Input):
             if not self._move_to(x, y):
                 self._checked(False, f'move ({int(x)}, {int(y)})')
                 return
+            self._wait_after_move()
             if not self._press_hold_release(wait_time):
                 return
             logger.debug(f'Virtual mouse press {wait_time}s ({int(x)}, {int(y)})')
@@ -306,6 +308,7 @@ class VirtualMouseInput(Input):
             if not self._move_to(x, y):
                 self._checked(False, f'move ({int(x)}, {int(y)})')
                 return
+            self._wait_after_move()
             self._checked(self.mouse_driver.press(BTN_LEFT), f'button down ({int(x)}, {int(y)})')
 
     def mouse_up(self):

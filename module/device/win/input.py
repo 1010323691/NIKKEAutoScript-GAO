@@ -114,10 +114,25 @@ def _send_scan_key(vk, key_up=False):
 class Input:
     # 禁用pyautogui的失败安全特性，防止意外中断
     pyautogui.FAILSAFE = False
+    # 光标到位后再按下的等待秒数，由 PCClientInfo.ClickMoveDelay 注入：光标刚到位就按下时
+    # 游戏可能还没响应移动，按下会丢失或落在旧位置。
+    click_move_delay = 0.0
+
+    def _wait_after_move(self):
+        if self.click_move_delay > 0:
+            time.sleep(self.click_move_delay)
+
+    def _move_before_press(self, x, y):
+        # 延迟为 0 时不额外 moveTo，保持原先一次调用完成移动+按下的行为与耗时
+        if self.click_move_delay <= 0:
+            return
+        pyautogui.moveTo(x, y)
+        self._wait_after_move()
 
     def mouse_click(self, x, y):
         """在屏幕上的（x，y）位置执行鼠标点击操作"""
         try:
+            self._move_before_press(x, y)
             pyautogui.click(x, y)
             logger.debug(f'鼠标点击 ({x}, {y})')
         except Exception as e:
@@ -126,6 +141,7 @@ class Input:
     def press_mouse_click(self, x, y, wait_time=0.2):
         """模拟鼠标左键的点击操作，可以指定按下的时间"""
         try:
+            self._move_before_press(x, y)
             pyautogui.mouseDown(x, y)
             time.sleep(wait_time)
             pyautogui.mouseUp()
@@ -136,6 +152,7 @@ class Input:
     def mouse_down(self, x, y):
         """在屏幕上的（x，y）位置按下鼠标按钮"""
         try:
+            self._move_before_press(x, y)
             pyautogui.mouseDown(x, y)
             logger.debug(f'鼠标按下 ({x}, {y})')
         except Exception as e:

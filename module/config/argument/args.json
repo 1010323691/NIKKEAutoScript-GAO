@@ -328,6 +328,10 @@
           "driver",
           "cursor"
         ]
+      },
+      "ClickMoveDelay": {
+        "type": "input",
+        "value": 1.0
       }
     },
     "PCClient": {

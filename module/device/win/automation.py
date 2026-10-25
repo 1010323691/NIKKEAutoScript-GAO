@@ -126,6 +126,9 @@ class Automation:
             logger.info('Control scheme: driver')
         else:
             self.input_handler = Input()
+        click_move_delay = getattr(self.config, 'PCClientInfo_ClickMoveDelay', 0)
+        self.input_handler.click_move_delay = max(0.0, float(click_move_delay))
+        logger.info(f'Click delay after move: {self.input_handler.click_move_delay}s')
         self.mouse_click = self.input_handler.mouse_click
         self.press_mouse_click = self.input_handler.press_mouse_click
         self.mouse_down = self.input_handler.mouse_down

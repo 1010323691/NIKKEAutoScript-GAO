@@ -559,6 +559,10 @@
       "help": "Only applies when the control scheme is driver.\ndriver: moves the cursor with relative displacement reports, converging on the target over several rounds; affected by Enhance Pointer Precision and mouse sensitivity.\ncursor: sets the cursor position directly through the system cursor API in a single call; unaffected by those mouse settings.",
       "driver": "driver (relative-report loop)",
       "cursor": "cursor (direct positioning)"
+    },
+    "ClickMoveDelay": {
+      "name": "Click Delay After Move",
+      "help": "Seconds to wait after the cursor reaches the target before pressing the button. Applies to clicks, long presses and mouse down in every control scheme (not swipes or scrolls). 0 clicks immediately after moving."
     }
   },
   "Optimization": {

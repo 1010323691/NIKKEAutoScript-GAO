@@ -159,6 +159,7 @@ PCClientInfo:
   MoveBackend:
     value: driver
     option: [ driver, cursor ]
+  ClickMoveDelay: 1.0
 Optimization:
   AutoRedCircle: false
   OcrModelType:

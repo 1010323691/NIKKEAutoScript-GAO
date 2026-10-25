@@ -74,6 +74,7 @@ class GeneratedConfig:
     PCClientInfo_ScreenshotInterval = 0.3
     PCClientInfo_ControlScheme = 'pyautogui'  # pyautogui, postmessage, driver
     PCClientInfo_MoveBackend = 'driver'  # driver, cursor
+    PCClientInfo_ClickMoveDelay = 1.0
 
     # Group `Optimization`
     Optimization_AutoRedCircle = False

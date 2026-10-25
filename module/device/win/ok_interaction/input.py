@@ -210,7 +210,7 @@ class PostMessageInput(Input):
             # 返回目标窗口局部坐标的 lParam
             click_pos = self.interaction.update_mouse_pos(client_x, client_y)
             win32api.SetCursorPos((int(x), int(y)))
-            time.sleep(0.025)
+            time.sleep(max(0.025, self.click_move_delay))
 
             if key == 'left':
                 btn_down, btn_mk, btn_up = win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, win32con.WM_LBUTTONUP
@@ -240,7 +240,7 @@ class PostMessageInput(Input):
             click_pos = self.interaction.update_mouse_pos(client_x, client_y)
             self._last_down_pos = click_pos
             win32api.SetCursorPos((int(x), int(y)))
-            time.sleep(0.025)
+            time.sleep(max(0.025, self.click_move_delay))
             self.interaction.post(win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, click_pos)
             logger.debug(f'PostMessage mouse down ({x}, {y})')
         except Exception as e:
