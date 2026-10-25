@@ -20,6 +20,10 @@ from module.ui.assets import (
     SKIP,
 )
 
+# STORY_*_HARD_LOCKED 是困难标签上的「X月X日 开始」，只能识别未到开放时间的锁定；
+# 到时间后普通未通关的锁定没有这行字，只能靠点困难标签后进不去来判断
+STORY_HARD_SWITCH_MAX_CLICKS = 5
+
 
 class EventStory(EventBase):
     def STORY_PART_CHECK(self, story):
@@ -306,10 +310,9 @@ class EventStory(EventBase):
                     self.event_assets.STORY_2_HARD_LOCKED, offset=10
                 ):
                     logger.info('Find difficulty normal opened')
+                    # 困难要先通关普通才解锁，配置成困难时也先推普通
                     if self.config.EventInfo_StoryDifficulty == 'Hard':
-                        logger.error('The event stage/difficulty select wrong')
-                        self.back_to_event()
-                        return
+                        logger.warning('Event story 2 hard is locked, push normal first')
                     open_story = 'story_2_normal'
                     logger.info('Open event story 2 normal')
                     break
@@ -331,6 +334,7 @@ class EventStory(EventBase):
                         self.back_to_event()
                         return
 
+                    hard_clicks = 0
                     while 1:
                         if skip_first_screenshot:
                             skip_first_screenshot = False
@@ -338,9 +342,13 @@ class EventStory(EventBase):
                             self.device.screenshot()
 
                         # story2困难难度切换
-                        if click_timer.reached() and self.appear_then_click(
-                            self.event_assets.STORY_2_HARD_HIDDEN, threshold=10
-                        ):
+                        if click_timer.reached() and self.appear(self.event_assets.STORY_2_HARD_HIDDEN, threshold=10):
+                            if hard_clicks >= STORY_HARD_SWITCH_MAX_CLICKS:
+                                logger.warning('Event story 2 hard is locked, push normal first')
+                                open_story = 'story_2_normal'
+                                break
+                            self.device.click(self.event_assets.STORY_2_HARD_HIDDEN)
+                            hard_clicks += 1
                             click_timer.reset()
                             continue
 
@@ -349,7 +357,7 @@ class EventStory(EventBase):
                             click_timer.reset()
                             break
 
-                    logger.info('Open event story 2 hard')
+                    logger.info(f'Open event {open_story}')
                     break
 
         # 关卡处理
@@ -420,10 +428,9 @@ class EventStory(EventBase):
                 self.event_assets.STORY_1_HARD_LOCKED, offset=10
             ):
                 logger.info('Find difficulty normal opened')
+                # 困难要先通关普通才解锁，配置成困难时也先推普通
                 if self.config.EventInfo_StoryDifficulty == 'Hard':
-                    logger.error('The event stage/difficulty select wrong')
-                    self.back_to_event()
-                    return
+                    logger.warning('Event story hard is locked, push normal first')
                 open_story = 'story_1_normal'
                 logger.info('Open event story normal')
                 break
@@ -445,6 +452,7 @@ class EventStory(EventBase):
                     self.back_to_event()
                     return
 
+                hard_clicks = 0
                 while 1:
                     if skip_first_screenshot:
                         skip_first_screenshot = False
@@ -452,14 +460,20 @@ class EventStory(EventBase):
                         self.device.screenshot()
 
                     # story困难难度切换
-                    if self.appear_then_click(self.event_assets.STORY_1_HARD_HIDDEN, threshold=10):
+                    if self.appear(self.event_assets.STORY_1_HARD_HIDDEN, threshold=10):
+                        if hard_clicks >= STORY_HARD_SWITCH_MAX_CLICKS:
+                            logger.warning('Event story hard is locked, push normal first')
+                            open_story = 'story_1_normal'
+                            break
+                        self.device.click(self.event_assets.STORY_1_HARD_HIDDEN)
+                        hard_clicks += 1
                         continue
 
                     # story困难难度列表页面
                     if self.appear(self.event_assets.STORY_1_HARD, threshold=10):
                         break
 
-                logger.info('Open event story hard')
+                logger.info(f'Open event {open_story}')
                 break
 
         self.device.sleep(2)
