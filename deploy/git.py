@@ -8,6 +8,13 @@ from deploy.config import DeployConfig, ExecutionError
 from module.logger import logger
 
 
+class MergeBlocked(ExecutionError):
+    """
+    Merging upstream into local commits was refused (conflicts, files that
+    would be overwritten).  Retrying cannot help; the user has to act.
+    """
+
+
 class GitManager(DeployConfig):
     @cached_property
     def git(self):
@@ -35,10 +42,51 @@ class GitManager(DeployConfig):
         except Exception:
             return ''
 
+    def _git_checked(self, args, stdin=None) -> str:
+        """
+        Run git and return stdout.  Unlike _git_output() a failure raises, so a
+        failed lookup is never mistaken for "nothing found" and steered into
+        the destructive reset --hard path.
+        """
+        try:
+            result = subprocess.run(
+                [self.git, '-c', 'core.quotepath=false', *args],
+                input=stdin,
+                capture_output=True,
+                text=True,
+                encoding='utf8',
+            )
+        except OSError as e:
+            raise ExecutionError(f'git {args[0]} failed: {e}')
+        if result.returncode:
+            raise ExecutionError(self.git_error_message(args[0], result.stderr) or f'git {args[0]} failed')
+        return result.stdout.strip()
+
+    def git_error_message(self, command, stderr) -> str:
+        stderr = str(stderr or '').strip()
+        if 'dubious ownership' in stderr:
+            root = self.root_filepath.replace('\\', '/')
+            return (
+                'Git refuses to use this folder because it is owned by another Windows user. '
+                f'Run: git config --global --add safe.directory {root}'
+            )
+        return f'git {command} failed: {stderr}' if stderr else ''
+
     @staticmethod
     def _normalize_remote_url(url) -> str:
         url = str(url or '').strip().replace('\\', '/').rstrip('/').lower()
         return url[:-4] if url.endswith('.git') else url
+
+    def _matching_remote(self):
+        repo = self._normalize_remote_url(self.Repository)
+        remotes = {}
+        for line in self._git_checked(['remote', '-v']).splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                remotes.setdefault(parts[0], self._normalize_remote_url(parts[1]))
+        if remotes.get('origin') == repo:
+            return 'origin'
+        return next((name for name, url in remotes.items() if url == repo), None)
 
     def update_source(self) -> str:
         """
@@ -46,33 +94,57 @@ class GitManager(DeployConfig):
         origin and adds the official one under another name (e.g. upstream);
         rewriting origin there would silently repoint the fork.
         """
-        repo = self._normalize_remote_url(self.Repository)
-        remotes = {}
-        for line in self._git_output(['remote', '-v']).splitlines():
-            parts = line.split()
-            if len(parts) >= 2:
-                remotes.setdefault(parts[0], self._normalize_remote_url(parts[1]))
-        if remotes.get('origin') == repo:
-            return 'origin'
-        for name, url in remotes.items():
-            if url == repo:
-                return name
-        return 'origin'
+        return self._matching_remote() or 'origin'
 
-    def _count_commits(self, revision_range) -> int:
-        try:
-            return int(self._git_output(['rev-list', '--count', revision_range]) or 0)
-        except ValueError:
-            return 0
-
-    def use_merge_update(self, source, branch) -> bool:
-        """
-        Local commits that upstream does not have would be destroyed by
-        reset --hard, so such checkouts are updated by merging instead.
-        """
+    def _has_head(self) -> bool:
         if not os.path.exists('./.git'):
             return False
-        return source != 'origin' or self._count_commits(f'{source}/{branch}..HEAD') > 0
+        try:
+            self._git_checked(['rev-parse', '--verify', '--quiet', 'HEAD'])
+        except ExecutionError:
+            return False
+        return True
+
+    def _count_commits(self, *revisions) -> int:
+        output = self._git_checked(
+            ['rev-list', '--count', '--ignore-missing', '--stdin'], stdin='\n'.join(revisions) + '\n'
+        )
+        return int(output or 0)
+
+    def local_commit_count(self, branch) -> int:
+        """
+        Commits in HEAD that Repository never had.  Earlier tips of the
+        remote-tracking ref count as upstream too, so history the official
+        repository rewrote is not mistaken for local work.  The source must
+        have been fetched beforehand.
+        """
+        remote = self._matching_remote()
+        if remote is None:
+            self._git_checked(['fetch', self.Repository, branch])
+            return self._count_commits('HEAD', '^FETCH_HEAD')
+        ref = f'{remote}/{branch}'
+        self._git_checked(['rev-parse', '--verify', ref])
+        previous = self._git_output(['log', '-g', '--format=%H', '-n', '50', ref]).split()
+        return self._count_commits('HEAD', f'^{ref}', *(f'^{sha}' for sha in previous))
+
+    def use_merge_update(self, branch) -> bool:
+        """
+        Whether this checkout must be updated by merging, because reset --hard
+        would destroy local commits.  The source must have been fetched.
+        """
+        if not self._has_head():
+            return False
+        remote = self._matching_remote()
+        if remote not in (None, 'origin'):
+            # origin is the user's own repository here; never repoint or reset it.
+            return True
+        local = self.local_commit_count(branch)
+        if local and remote is None:
+            raise MergeBlocked(
+                f'{local} local commits are not in {self.Repository}, but no git remote points to it, '
+                f'so nothing was updated. Add one to merge updates: git remote add upstream {self.Repository}'
+            )
+        return local > 0
 
     def merge_blocker(self, ref) -> str:
         """
@@ -83,7 +155,8 @@ class GitManager(DeployConfig):
         """
         try:
             result = subprocess.run(
-                [self.git, 'merge-tree', '--write-tree', '--name-only', '--no-messages', 'HEAD', ref],
+                [self.git, '-c', 'core.quotepath=false', 'merge-tree', '--write-tree', '--name-only',
+                 '--no-messages', 'HEAD', ref],
                 capture_output=True,
                 text=True,
                 encoding='utf8',
@@ -98,13 +171,22 @@ class GitManager(DeployConfig):
             )
         if result.returncode != 0 or not lines:
             return f'Unable to test merge with {ref}: {result.stderr.strip() or result.returncode}'
-        incoming = set(self._git_output(['diff', '--name-only', 'HEAD', lines[0]]).splitlines())
-        modified = set(self._git_output(['diff', '--name-only', 'HEAD']).splitlines())
-        overwritten = sorted(incoming & modified)
+        tree = lines[0]
+        incoming = set(self._git_checked(['diff', '--name-only', 'HEAD', tree]).splitlines())
+        modified = set(self._git_checked(['diff', '--name-only', 'HEAD']).splitlines())
+        # git merge also refuses to overwrite untracked (but not ignored) files.
+        added = self._git_checked(['diff', '--name-only', '--diff-filter=A', 'HEAD', tree]).splitlines()
+        added = [path for path in added if os.path.lexists(path)]
+        untracked = set()
+        if added:
+            untracked = set(
+                self._git_checked(['ls-files', '--others', '--exclude-standard', '--', *added]).splitlines()
+            )
+        overwritten = sorted((incoming & modified) | untracked)
         if overwritten:
             return (
-                f'Update from {ref} would overwrite uncommitted local changes, nothing was merged. '
-                f'Commit or discard them first: {self._format_files(overwritten)}'
+                f'Update from {ref} would overwrite uncommitted or untracked local files, nothing was merged. '
+                f'Commit, move or discard them first: {self._format_files(overwritten)}'
             )
         return ''
 
@@ -117,14 +199,16 @@ class GitManager(DeployConfig):
         return text or '(unknown)'
 
     def git_merge_update(self, source, branch):
+        """
+        Merge the already fetched source branch, so what gets merged is what
+        the update check approved.
+        """
         logger.hr('Merge Repository Update', 1)
         ref = f'{source}/{branch}'
-        # No --depth here: shallowing a working repository would cut off its own history.
-        self.execute(f'"{self.git}" fetch {source} {branch}')
         blocker = self.merge_blocker(ref)
         if blocker:
             logger.warning(blocker)
-            raise ExecutionError(blocker)
+            raise MergeBlocked(blocker)
         identity = ''
         if not self._git_output(['config', 'user.email']):
             identity = '-c user.name=NKAS-Updater -c user.email=nkas-updater@localhost '
@@ -212,7 +296,15 @@ class GitManager(DeployConfig):
         logger.hr('Show Version', 1)
         self.execute(f'"{self.git}" --no-pager log --no-merges -1')
 
-    def git_update(self):
+    def git_update(self, allow_merge=False, fetch=True):
+        """
+        Args:
+            allow_merge (bool): Merge upstream into local commits.  Only the
+                update page passes True; startup auto-update leaves such
+                checkouts alone so merges stay a manual decision.
+            fetch (bool): Fetch before deciding.  The update page passes False
+                right after a check fetched, so it merges what was checked.
+        """
         logger.hr('Update Repository', 0)
 
         # Check if git executable exists, if not, download and install
@@ -220,10 +312,17 @@ class GitManager(DeployConfig):
             logger.info(f'Git executable not found: {self.git}')
             self.git_install()
 
-        source = self.update_source()
-        if self.use_merge_update(source, self.Branch):
-            self.git_merge_update(source, self.Branch)
-            return
+        if self._has_head():
+            source = self.update_source()
+            if fetch:
+                # Allowed to fail: when origin is a stale mirror, git_repository_init repoints it.
+                self.execute(f'"{self.git}" fetch {source} {self.Branch}', allow_failure=True)
+            if self.use_merge_update(self.Branch):
+                if not allow_merge:
+                    logger.info('Local commits present, skip automatic update, update manually from the update page')
+                    return
+                self.git_merge_update(source, self.Branch)
+                return
 
         self.git_repository_init(
             repo=self.Repository,

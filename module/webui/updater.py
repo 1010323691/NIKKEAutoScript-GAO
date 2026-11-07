@@ -6,7 +6,7 @@ from typing import Generator, List, Tuple
 
 import requests
 from deploy.config import ExecutionError
-from deploy.git import GitManager
+from deploy.git import GitManager, MergeBlocked
 from deploy.pip import PipManager
 from deploy.utils import DEPLOY_CONFIG
 from module.base.retry import retry
@@ -45,6 +45,12 @@ class Updater(DeployConfig, GitManager, PipManager):
         # the SPA via /api/system/update so a failure is not silently shown
         # as "up to date".
         self.check_error = ''
+        # Results of the last successful check, reused by status polling, the
+        # scheduled task and the update itself instead of asking git again.
+        self.source = None
+        self.merge_mode = False
+        self._update_checked = False
+        self._fetch_error = ''
 
     @property
     def delay(self):
@@ -111,9 +117,11 @@ class Updater(DeployConfig, GitManager, PipManager):
             result = subprocess.run(command, shell=True, capture_output=True, timeout=120)
         except subprocess.TimeoutExpired:
             logger.warning("Git fetch timed out after 120s")
+            self._fetch_error = 'git fetch timed out after 120s'
             return False
         if result.returncode:
             logger.info(f"[ allowed failure ], error_code: {result.returncode}")
+            self._fetch_error = self.git_error_message('fetch', _decode_output(result.stderr))
             return False
         logger.info("[ success ]")
         return True
@@ -148,28 +156,28 @@ class Updater(DeployConfig, GitManager, PipManager):
                 # failed, should fallback to `git pull`
                 pass
 
+        self._update_checked = False
+        self._fetch_error = ''
         source = self.update_source()
+        self.source = source
         for _ in range(3):
             if self._git_fetch(source):
                 break
         else:
             logger.warning("Git fetch failed")
+            if 'safe.directory' in self._fetch_error:
+                raise ExecutionError(self._fetch_error)
+            detail = f" ({self._fetch_error})" if self._fetch_error else ""
             raise ExecutionError(
                 "Git fetch failed: cannot reach the remote repository. "
-                "Check the network connection or the repository address."
+                f"Check the network connection or the repository address.{detail}"
             )
 
-        if self.use_merge_update(source, self.Branch):
+        # Commits that are only local switch to merging; everything else is
+        # reset to upstream, which also recovers from upstream rewriting history.
+        self.merge_mode = self.use_merge_update(self.Branch)
+        if self.merge_mode:
             return self._check_merge_update(f"{source}/{self.Branch}")
-
-        log = self.execute_output(
-            f'"{self.git}" log --not --remotes={source}/* -1 --oneline'
-        )
-        if log:
-            logger.info(
-                f"Cannot find local commit {log.split()[0]} in upstream, skip update"
-            )
-            return False
 
         sha1, _, _, message = self.get_commit(f"..{source}/{self.Branch}")
 
@@ -181,16 +189,27 @@ class Updater(DeployConfig, GitManager, PipManager):
             logger.info(f"No update")
             return False
 
+    def current_source(self) -> str:
+        """Update remote for display, resolved once instead of on every status poll."""
+        if self.source is None:
+            try:
+                self.source = self.update_source()
+            except ExecutionError:
+                return "origin"
+        return self.source
+
     def _check_merge_update(self, ref) -> bool:
         behind = self._count_commits(f"HEAD..{ref}")
         if not behind:
             logger.info(f"No update, local commits ahead of {ref}: {self._count_commits(f'{ref}..HEAD')}")
+            self._update_checked = True
             return False
         blocker = self.merge_blocker(ref)
         if blocker:
             logger.warning(blocker)
             raise ExecutionError(blocker)
         logger.info(f"New update available, {behind} commits from {ref} merge cleanly with local commits")
+        self._update_checked = True
         return True
 
     def _check_update_(self) -> bool:
@@ -280,9 +299,19 @@ class Updater(DeployConfig, GitManager, PipManager):
         if self.state != "failed":
             self.state = result
 
-    @retry(ExecutionError, tries=3, delay=5, logger=None)
-    def git_update(self):
-        return super().git_update()
+    def git_update(self, allow_merge=True, fetch=None):
+        # A refused merge is deterministic, so only other failures are retried.
+        fetch = not self._update_checked if fetch is None else fetch
+        for attempt in range(3):
+            try:
+                return super().git_update(allow_merge=allow_merge, fetch=fetch)
+            except MergeBlocked:
+                raise
+            except ExecutionError:
+                if attempt == 2:
+                    raise
+                time.sleep(5)
+                fetch = True
 
     @retry(ExecutionError, tries=3, delay=5, logger=None)
     def pip_install(self):
@@ -294,10 +323,16 @@ class Updater(DeployConfig, GitManager, PipManager):
         try:
             self.git_update()
             self.pip_install()
-        except ExecutionError as e:
+        except MergeBlocked as e:
             # Surfaced on the update page, so a refused merge says which files conflict.
+            # Other failures keep check_error empty so the page offers a retry.
             self.check_error = str(e)
             return False
+        except ExecutionError:
+            return False
+        finally:
+            # The fetched ref has been consumed; a later update must fetch again.
+            self._update_checked = False
         return True
 
     def run_update(self):
@@ -391,7 +426,7 @@ class Updater(DeployConfig, GitManager, PipManager):
             if State.restart_event is None:
                 yield
                 continue
-            if self.use_merge_update(self.update_source(), self.Branch):
+            if self.merge_mode:
                 # Merging into local commits is left to the user from the update page.
                 logger.info("Local commits present, skip scheduled update")
                 th._task.delay = get_next_time(self.schedule_time)

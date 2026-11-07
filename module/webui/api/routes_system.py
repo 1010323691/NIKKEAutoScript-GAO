@@ -38,7 +38,7 @@ async def status(request: Request):
 
 async def update_status(_: Request):
     local = updater.get_commit(short_sha1=True)
-    ref = f'{updater.update_source()}/{updater.Branch}'
+    ref = f'{updater.current_source()}/{updater.Branch}'
     upstream = updater.get_commit(ref, short_sha1=True)
     history = updater.get_commit(ref, n=20, short_sha1=True)
     return JSONResponse({
