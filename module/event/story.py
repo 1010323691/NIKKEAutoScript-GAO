@@ -2,6 +2,7 @@ from functools import cached_property
 
 from module.base.button import Button, filter_buttons_in_area, merge_buttons
 from module.base.decorator import Config
+from module.base.langs import Langs
 from module.base.timer import Timer
 from module.base.utils import crop, sort_buttons_by_location
 from module.conversation.assets import ANSWER_CHECK
@@ -9,6 +10,7 @@ from module.event.assets import *
 from module.event.base import EventBase
 from module.event.challenge import CHALLENGE_QUICKLY_DISABLE
 from module.logger import logger
+from module.ocr.ocr import Ocr
 from module.simulation_room.assets import END_FIGHTING, FIGHT, FIGHT_QUICKLY
 from module.tribe_tower.assets import NEXT_STAGE
 from module.ui.assets import (
@@ -20,12 +22,25 @@ from module.ui.assets import (
     SKIP,
 )
 
-# STORY_*_HARD_LOCKED 是困难标签上的「X月X日 开始」，只能识别未到开放时间的锁定；
+# appear_hard_locked() 识别的是困难标签上的开放倒计时，只能识别未到开放时间的锁定；
 # 到时间后普通未通关的锁定没有这行字，只能靠点困难标签后进不去来判断
 STORY_HARD_SWITCH_MAX_CLICKS = 5
 
 
 class EventStory(EventBase):
+    def appear_hard_locked(self):
+        result = Ocr(
+            buttons=(530, 1110, 700, 1210),
+            lang='ch',
+            model_type=self.config.Optimization_OcrModelType,
+            name='EVENT_HARD_LOCKED',
+        ).ocr(self.device.image)
+        text = ''.join(result['text'].split()).casefold()
+        # 倒计时提示可能被拆行或漏字，命中片段即可，不依赖数字和时间单位。
+        locked = any(hint.casefold() in text for hint in Langs.EVENT_HARD_LOCKED_HINTS)
+        logger.info(f'Event hard locked: {locked}, OCR: {text!r}')
+        return locked
+
     def STORY_PART_CHECK(self, story):
         # 只读取当前章节的模板，避免要求活动提供其他类型才会用到的资源。
         stages = {
@@ -35,6 +50,14 @@ class EventStory(EventBase):
             'story_2_hard': 'STORY_2_HARD',
         }
         return getattr(self.event_assets, stages[story])
+
+    def appear_story_part(self, story, offset=30):
+        button = self.STORY_PART_CHECK(story)
+        if story == 'story_1_normal':
+            if self.event.type == 2:
+                return self.appear(button, threshold=20)
+            return self.appear(button, offset=offset)
+        return self.appear(button, threshold=10) and self.appear(button, offset=offset)
 
     def STORY_STAGE_11(self, story):
         stages = {
@@ -115,10 +138,7 @@ class EventStory(EventBase):
             f'{finder["horizontal_direction"]}'
         )
         for index, (base_x, base_y) in enumerate(points, start=1):
-            if not (
-                self.appear(self.STORY_PART_CHECK(open_story), threshold=10)
-                and self.appear(self.STORY_PART_CHECK(open_story), offset=30)
-            ):
+            if not self.appear_story_part(open_story, offset=10):
                 logger.warning('Not in story list page, retry')
                 return 'retry'
             # 关卡推完回到了关卡列表
@@ -189,6 +209,22 @@ class EventStory(EventBase):
         logger.info('Grid pending finder exhausted all points')
         return 'exhausted'
 
+    def ensure_manual_normal(self, story):
+        normal = self.STORY_PART_CHECK(story)
+        hard_story = story.replace('_normal', '_hard')
+        timeout = Timer(15).start()
+        click_timer = Timer(1)
+        while not timeout.reached():
+            if self.appear_story_part(story):
+                return True
+            # The inactive Normal tab is darker, so confirm Hard before clicking its known position.
+            if self.appear_story_part(hard_story) and click_timer.reached():
+                self.device.click(normal)
+                click_timer.reset()
+            self.device.screenshot()
+        logger.warning(f'Unable to select manual event stage: {story}')
+        return False
+
     @cached_property
     def team_nikke_locations(self):
         """
@@ -197,12 +233,13 @@ class EventStory(EventBase):
         return [(610, 360), (485, 360), (360, 360), (235, 360), (115, 360)]
 
     @Config.when(EVENT_TYPE=(1, 3))
-    def story(self, skip_first_screenshot=True):
+    def story(self, skip_first_screenshot=True, select_only=False):
         logger.hr('START EVENT STORY', 2)
         click_timer = Timer(0.3)
 
         logger.info('Finding opened event story')
         open_story = 'story_1_normal'
+        manual_story_1 = self.config.EventInfo_ManualStage and self.config.EventInfo_StoryPart == 'Story_1'
         # 判断并进入最新的关卡列表
         while 1:
             if skip_first_screenshot:
@@ -211,8 +248,8 @@ class EventStory(EventBase):
                 self.device.screenshot()
 
             # 检查story2是否开启，未开启则进入1
-            if self.appear(self.event_assets.EVENT_GOTO_STORY_1, offset=10) and self.appear(
-                self.event_assets.EVENT_GOTO_STORY_2_LOCKED, offset=10
+            if self.appear(self.event_assets.EVENT_GOTO_STORY_1, offset=10) and (
+                manual_story_1 or self.appear(self.event_assets.EVENT_GOTO_STORY_2_LOCKED, offset=10)
             ):
                 logger.info('Find opened event story 1')
                 if self.config.EventInfo_StoryPart == 'Story_2':
@@ -242,7 +279,7 @@ class EventStory(EventBase):
 
                     # story1列表页面
                     if not self.appear(self.event_assets.EVENT_GOTO_STORY_1, offset=10) and self.appear(
-                        self.event_assets.STORY_1_NORMAL, threshold=20
+                        self.event_assets.STORY_1_NORMAL, offset=(10, 10)
                     ):
                         click_timer.reset()
                         break
@@ -305,10 +342,16 @@ class EventStory(EventBase):
                 logger.info('Open event story 2')
 
                 self.device.screenshot()
+                if self.config.EventInfo_ManualStage and self.config.EventInfo_StoryDifficulty == 'Normal':
+                    if not self.ensure_manual_normal('story_2_normal'):
+                        self.back_to_event()
+                        return
+                    open_story = 'story_2_normal'
+                    break
+                normal_selected = self.appear(self.event_assets.STORY_2_NORMAL, threshold=10)
+                hard_locked = normal_selected and self.appear_hard_locked()
                 # 困难难度关闭
-                if self.appear(self.event_assets.STORY_2_NORMAL, threshold=10) and self.appear(
-                    self.event_assets.STORY_2_HARD_LOCKED, offset=10
-                ):
+                if hard_locked:
                     logger.info('Find difficulty normal opened')
                     # 困难要先通关普通才解锁，配置成困难时也先推普通
                     if self.config.EventInfo_StoryDifficulty == 'Hard':
@@ -318,9 +361,7 @@ class EventStory(EventBase):
                     break
 
                 # 困难难度开启，当前页面是普通
-                if self.appear(self.event_assets.STORY_2_NORMAL, threshold=10) and not self.appear(
-                    self.event_assets.STORY_2_HARD_LOCKED, offset=10
-                ):
+                if normal_selected and not hard_locked:
                     open_story = 'story_2_hard'
 
                 # 困难难度开启，当前页面是困难
@@ -361,10 +402,20 @@ class EventStory(EventBase):
                     break
 
         # 关卡处理
+        if select_only:
+            return open_story
         self.device.sleep(2)
         self.device.screenshot()
+        sweep_from_first_screen = False
+        if open_story == 'story_2_normal' and self.event.story_2_normal_sweep_scroll:
+            first_screen_end = getattr(self.event_assets, 'STORY_2_NORMAL_STAGE_LIST_1_END', None)
+            if first_screen_end is not None and self.appear(first_screen_end, offset=30):
+                logger.info('STORY_2_NORMAL_STAGE_LIST_1_END matched, skip pushing and scroll for sweep check')
+                sweep_from_first_screen = True
+                self.ensure_sroll((360, 1000), (360, 400), method='swipe', count=3)
+                self.device.screenshot()
         # 推图
-        if self.config.StoryStage_AutoPush:
+        if self.config.StoryStage_AutoPush and not sweep_from_first_screen:
             logger.info(f'Start checking push stage for {open_story}')
             self.find_and_push_stage(open_story)
 
@@ -378,7 +429,7 @@ class EventStory(EventBase):
         self.back_to_event()
 
     @Config.when(EVENT_TYPE=2)
-    def story(self, skip_first_screenshot=True):
+    def story(self, skip_first_screenshot=True, select_only=False):
         logger.hr('START EVENT STORY', 2)
 
         open_story = 'story_1_normal'
@@ -423,10 +474,16 @@ class EventStory(EventBase):
 
             self.device.sleep(1)
             self.device.screenshot()
+            if self.config.EventInfo_ManualStage and self.config.EventInfo_StoryDifficulty == 'Normal':
+                if not self.ensure_manual_normal('story_1_normal'):
+                    self.back_to_event()
+                    return
+                open_story = 'story_1_normal'
+                break
+            normal_selected = self.appear(self.event_assets.STORY_1_NORMAL, threshold=20)
+            hard_locked = normal_selected and self.appear_hard_locked()
             # 困难难度关闭
-            if self.appear(self.event_assets.STORY_1_NORMAL, threshold=20) and self.appear(
-                self.event_assets.STORY_1_HARD_LOCKED, offset=10
-            ):
+            if hard_locked:
                 logger.info('Find difficulty normal opened')
                 # 困难要先通关普通才解锁，配置成困难时也先推普通
                 if self.config.EventInfo_StoryDifficulty == 'Hard':
@@ -436,9 +493,7 @@ class EventStory(EventBase):
                 break
 
             # 困难难度开启，当前页面是普通
-            if self.appear(self.event_assets.STORY_1_NORMAL, threshold=20) and not self.appear(
-                self.event_assets.STORY_1_HARD_LOCKED, offset=10
-            ):
+            if normal_selected and not hard_locked:
                 open_story = 'story_1_hard'
 
             # 困难难度开启，当前页面是困难
@@ -476,6 +531,8 @@ class EventStory(EventBase):
                 logger.info(f'Open event {open_story}')
                 break
 
+        if select_only:
+            return open_story
         self.device.sleep(2)
         self.device.screenshot()
         # 推图
@@ -523,8 +580,7 @@ class EventStory(EventBase):
                 if grid_mode:
                     if (
                         grid_retry_timer.reached()
-                        and self.appear(self.STORY_PART_CHECK(open_story), threshold=10)
-                        and self.appear(self.STORY_PART_CHECK(open_story), offset=30)
+                        and self.appear_story_part(open_story)
                         and not self.appear(self.event_assets.STORY_STAGE_CHECK, offset=30)
                     ):
                         result = self.find_pending_stage_by_grid(open_story)
@@ -684,7 +740,7 @@ class EventStory(EventBase):
                 if (
                     max_clicks < 3
                     and self.appear(FIGHT_QUICKLY_CHECK, offset=10)
-                    and self.appear_then_click(FIGHT_QUICKLY_MAX, offset=30, threshold=0.99, interval=1)
+                    and self.appear_then_click(FIGHT_QUICKLY_MAX, offset=30, threshold=0.99, interval=0.5)
                 ):
                     max_clicks += 1
                     self.device.sleep(0.3)
@@ -692,7 +748,8 @@ class EventStory(EventBase):
 
                 # 进行战斗
                 if (
-                    self.appear(FIGHT_QUICKLY_CHECK, offset=10)
+                    max_clicks >= 3
+                    and self.appear(FIGHT_QUICKLY_CHECK, offset=10)
                     and self.appear(FIGHT_QUICKLY_MIN, offset=30, threshold=0.99)
                     and self.appear_then_click(FIGHT_QUICKLY_FIGHT, threshold=20, interval=1)
                 ):
