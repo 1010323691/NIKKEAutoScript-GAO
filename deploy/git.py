@@ -35,6 +35,103 @@ class GitManager(DeployConfig):
         except Exception:
             return ''
 
+    @staticmethod
+    def _normalize_remote_url(url) -> str:
+        url = str(url or '').strip().replace('\\', '/').rstrip('/').lower()
+        return url[:-4] if url.endswith('.git') else url
+
+    def update_source(self) -> str:
+        """
+        Remote that tracks Repository.  A fork keeps its own repository as
+        origin and adds the official one under another name (e.g. upstream);
+        rewriting origin there would silently repoint the fork.
+        """
+        repo = self._normalize_remote_url(self.Repository)
+        remotes = {}
+        for line in self._git_output(['remote', '-v']).splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                remotes.setdefault(parts[0], self._normalize_remote_url(parts[1]))
+        if remotes.get('origin') == repo:
+            return 'origin'
+        for name, url in remotes.items():
+            if url == repo:
+                return name
+        return 'origin'
+
+    def _count_commits(self, revision_range) -> int:
+        try:
+            return int(self._git_output(['rev-list', '--count', revision_range]) or 0)
+        except ValueError:
+            return 0
+
+    def use_merge_update(self, source, branch) -> bool:
+        """
+        Local commits that upstream does not have would be destroyed by
+        reset --hard, so such checkouts are updated by merging instead.
+        """
+        if not os.path.exists('./.git'):
+            return False
+        return source != 'origin' or self._count_commits(f'{source}/{branch}..HEAD') > 0
+
+    def merge_blocker(self, ref) -> str:
+        """
+        Dry-run merging ref into HEAD without touching the work tree.
+
+        Returns:
+            str: '' if the merge is clean, otherwise why it must not be merged.
+        """
+        try:
+            result = subprocess.run(
+                [self.git, 'merge-tree', '--write-tree', '--name-only', '--no-messages', 'HEAD', ref],
+                capture_output=True,
+                text=True,
+                encoding='utf8',
+            )
+        except OSError as e:
+            return f'Unable to test merge with {ref}: {e}'
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if result.returncode == 1:
+            return (
+                f'Update from {ref} conflicts with local commits, nothing was merged. '
+                f'Conflicting files: {self._format_files(lines[1:])}'
+            )
+        if result.returncode != 0 or not lines:
+            return f'Unable to test merge with {ref}: {result.stderr.strip() or result.returncode}'
+        incoming = set(self._git_output(['diff', '--name-only', 'HEAD', lines[0]]).splitlines())
+        modified = set(self._git_output(['diff', '--name-only', 'HEAD']).splitlines())
+        overwritten = sorted(incoming & modified)
+        if overwritten:
+            return (
+                f'Update from {ref} would overwrite uncommitted local changes, nothing was merged. '
+                f'Commit or discard them first: {self._format_files(overwritten)}'
+            )
+        return ''
+
+    @staticmethod
+    def _format_files(files, limit=10) -> str:
+        files = list(files)
+        text = ', '.join(files[:limit])
+        if len(files) > limit:
+            text += f' (+{len(files) - limit} more)'
+        return text or '(unknown)'
+
+    def git_merge_update(self, source, branch):
+        logger.hr('Merge Repository Update', 1)
+        ref = f'{source}/{branch}'
+        # No --depth here: shallowing a working repository would cut off its own history.
+        self.execute(f'"{self.git}" fetch {source} {branch}')
+        blocker = self.merge_blocker(ref)
+        if blocker:
+            logger.warning(blocker)
+            raise ExecutionError(blocker)
+        identity = ''
+        if not self._git_output(['config', 'user.email']):
+            identity = '-c user.name=NKAS-Updater -c user.email=nkas-updater@localhost '
+        self.execute(f'"{self.git}" {identity}merge --no-edit {ref}')
+        logger.hr('Show Version', 1)
+        self.execute(f'"{self.git}" --no-pager log -1')
+
     def _is_up_to_date(self, source, branch) -> bool:
         """
         Fast path check: local HEAD already matches the remote branch tip and
@@ -122,6 +219,11 @@ class GitManager(DeployConfig):
         if not os.path.exists(self.git):
             logger.info(f'Git executable not found: {self.git}')
             self.git_install()
+
+        source = self.update_source()
+        if self.use_merge_update(source, self.Branch):
+            self.git_merge_update(source, self.Branch)
+            return
 
         self.git_repository_init(
             repo=self.Repository,

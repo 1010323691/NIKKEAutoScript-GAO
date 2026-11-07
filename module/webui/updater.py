@@ -148,7 +148,7 @@ class Updater(DeployConfig, GitManager, PipManager):
                 # failed, should fallback to `git pull`
                 pass
 
-        source = "origin"
+        source = self.update_source()
         for _ in range(3):
             if self._git_fetch(source):
                 break
@@ -158,6 +158,9 @@ class Updater(DeployConfig, GitManager, PipManager):
                 "Git fetch failed: cannot reach the remote repository. "
                 "Check the network connection or the repository address."
             )
+
+        if self.use_merge_update(source, self.Branch):
+            return self._check_merge_update(f"{source}/{self.Branch}")
 
         log = self.execute_output(
             f'"{self.git}" log --not --remotes={source}/* -1 --oneline'
@@ -177,6 +180,18 @@ class Updater(DeployConfig, GitManager, PipManager):
         else:
             logger.info(f"No update")
             return False
+
+    def _check_merge_update(self, ref) -> bool:
+        behind = self._count_commits(f"HEAD..{ref}")
+        if not behind:
+            logger.info(f"No update, local commits ahead of {ref}: {self._count_commits(f'{ref}..HEAD')}")
+            return False
+        blocker = self.merge_blocker(ref)
+        if blocker:
+            logger.warning(blocker)
+            raise ExecutionError(blocker)
+        logger.info(f"New update available, {behind} commits from {ref} merge cleanly with local commits")
+        return True
 
     def _check_update_(self) -> bool:
         """
@@ -275,10 +290,13 @@ class Updater(DeployConfig, GitManager, PipManager):
 
     def update(self):
         logger.hr("Run update")
+        self.check_error = ''
         try:
             self.git_update()
             self.pip_install()
-        except ExecutionError:
+        except ExecutionError as e:
+            # Surfaced on the update page, so a refused merge says which files conflict.
+            self.check_error = str(e)
             return False
         return True
 
@@ -371,6 +389,12 @@ class Updater(DeployConfig, GitManager, PipManager):
                 yield
                 continue
             if State.restart_event is None:
+                yield
+                continue
+            if self.use_merge_update(self.update_source(), self.Branch):
+                # Merging into local commits is left to the user from the update page.
+                logger.info("Local commits present, skip scheduled update")
+                th._task.delay = get_next_time(self.schedule_time)
                 yield
                 continue
             if not self.run_update():
