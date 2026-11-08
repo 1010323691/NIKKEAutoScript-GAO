@@ -6,7 +6,6 @@ from module.daily.assets import RECEIVE
 from module.daemon.assets import (
     MAIN_STORY_FIGHT_FAILED_BACK,
     MAIN_STORY_HARD,
-    MAIN_STORY_MAP_CLOSE,
     MAIN_STORY_MARK_IN,
     MAIN_STORY_MARK_OUT,
     MAIN_STORY_MINIMAP_OPEN,
@@ -16,8 +15,9 @@ from module.daemon.assets import (
     MAIN_STORY_UNLOCK,
 )
 from module.daemon.daemon_base import DaemonBase
-from module.daemon.field_explore import FieldExplorer
+from module.daemon.field_explore import MINIMAP_AREA, FieldExplorer
 from module.event.assets import FIELD_CHANGE
+from module.exception import GameStuckError
 from module.handler.assets import CONFIRM_B
 from module.logger import logger
 from module.simulation_room.assets import AUTO_BURST, AUTO_SHOOT, END_FIGHTING, FIGHT, PAUSE
@@ -70,9 +70,16 @@ MAIN_STORY_EXPLORE_STILL_FRAMES = 2
 class SemiCombat(UI, DaemonBase):
     explorer: FieldExplorer = None
     explore_finished = False
+    # 探索器最近一次去打的敌人（全局坐标）。战败时只跳过它，叹号或红圈点进去的战斗与探索器无关
+    explore_enemy_target = None
 
     def in_main_story_field(self):
         return self.appear(MAIN_STORY_HARD, offset=30) or self.appear(MAIN_STORY_NORMAL, offset=30)
+
+    @staticmethod
+    def outside_minimap(point):
+        x1, y1, x2, y2 = MINIMAP_AREA
+        return not (x1 <= point[0] <= x2 and y1 <= point[1] <= y2)
 
     def main_story_explore_wait(self):
         """
@@ -126,7 +133,8 @@ class SemiCombat(UI, DaemonBase):
                 self.explore_finished = True
             return False
         self.explore_finished = False
-        point, _ = plan
+        point, kind = plan
+        self.explore_enemy_target = self.explorer.target if kind == 'enemy' else None
         self.device.click_xy(*point)
         self.main_story_explore_wait()
         return True
@@ -196,6 +204,9 @@ class SemiCombat(UI, DaemonBase):
         top, bottom = ENEMY_RING_SEARCH_Y
         mask[:top] = 0
         mask[bottom:] = 0
+        # 野外小地图一直开着，EX 的大三角和红圈尺寸相近
+        x1, y1, x2, y2 = MINIMAP_AREA
+        mask[y1:y2, x1:x2] = 0
 
         merged = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ENEMY_RING_MERGE_KERNEL))
         count, labels = cv2.connectedComponents(merged)
@@ -243,8 +254,7 @@ class SemiCombat(UI, DaemonBase):
                 self.device.screenshot()
 
             if timeout.reached():
-                logger.warning('Main story mission popup not closed, timeout')
-                return True
+                raise GameStuckError('Main story mission popup not closed')
 
             if (
                 click_timer.reached()
@@ -303,14 +313,16 @@ class SemiCombat(UI, DaemonBase):
                 click_timer.reset()
                 continue
 
-            # 战败：返回野外，跳过这个目标。右下角的重新挑战和 FIGHT 位置重叠，必须先于 FIGHT 判断
-            if self.appear(OPERATION_FAILED, offset=(30, 30)):
+            # 推主线战败：返回野外，跳过这个敌人。右下角的重新挑战和 FIGHT 位置重叠，必须先于 FIGHT 判断。
+            # 其他玩法沿用原来的重新挑战
+            if self.config.SemiCombat_MainStoryMark and self.appear(OPERATION_FAILED, offset=(30, 30)):
                 if click_timer.reached() and self.appear_then_click(
                     MAIN_STORY_FIGHT_FAILED_BACK, offset=(30, 30), interval=2
                 ):
                     logger.info('Main story fight failed')
-                    if self.explorer is not None:
-                        self.explorer.skip_target()
+                    if self.explorer is not None and self.explore_enemy_target is not None:
+                        self.explorer.skip_target(self.explore_enemy_target)
+                    self.explore_enemy_target = None
                     click_timer.reset()
                 continue
 
@@ -338,16 +350,6 @@ class SemiCombat(UI, DaemonBase):
                 # 换章节后是新地图
                 self.explorer = None
                 new_chapter_confirm_timer.reset()
-                click_timer.reset()
-                continue
-
-            # 关闭地图。野外要靠小地图找怪，不关
-            if (
-                self.config.SemiCombat_MainStoryMark
-                and click_timer.reached()
-                and not self.in_main_story_field()
-                and self.appear_then_click(MAIN_STORY_MAP_CLOSE, offset=30, interval=1)
-            ):
                 click_timer.reset()
                 continue
 
@@ -397,6 +399,7 @@ class SemiCombat(UI, DaemonBase):
                     enemy_pause_timer.reset()
                 elif enemy is not None:
                     logger.info(f'Click main story enemy at {enemy}')
+                    self.explore_enemy_target = None
                     self.device.click_xy(*enemy)
                     enemy_click_count += 1
                     enemy_timer.reset()
@@ -409,8 +412,11 @@ class SemiCombat(UI, DaemonBase):
                 and click_timer.reached()
                 and enemy_timer.reached()
                 and self.appear(MAIN_STORY_NORMAL, offset=30)
-                and self.appear_then_click(MAIN_STORY_MARK_OUT, offset=30, threshold=0.85, interval=5, static=False)
+                and self.appear(MAIN_STORY_MARK_OUT, offset=30, threshold=0.85, interval=5, static=False)
+                and self.outside_minimap(MAIN_STORY_MARK_OUT.location)
             ):
+                self.explore_enemy_target = None
+                self.device.click(MAIN_STORY_MARK_OUT)
                 click_timer.reset()
                 continue
 
@@ -423,7 +429,9 @@ class SemiCombat(UI, DaemonBase):
                 and not self.appear(FIGHT, threshold=20)
                 and self.appear(MAIN_STORY_NORMAL, offset=30)
                 and self.appear_with_scale(MAIN_STORY_MARK_IN, scale_range=(0.7, 1.2), interval=5)
+                and self.outside_minimap(MAIN_STORY_MARK_IN.location)
             ):
+                self.explore_enemy_target = None
                 self.device.click(MAIN_STORY_MARK_IN, self.main_story_mark_click_offset())
                 click_timer.reset()
                 continue

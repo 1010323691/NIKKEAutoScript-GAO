@@ -18,8 +18,11 @@ MINIMAP_ENEMY_HSV = (((160, 70, 150), (180, 255, 255)), ((0, 70, 150), (8, 255, 
 MINIMAP_WHITE_HSV = ((0, 0, 200), (180, 60, 255))
 # 红三角约 10px；更小的是贴着视野边缘只露出一角的，位置不准，等走近再算
 MINIMAP_ENEMY_MIN_AREA = 25
-# EX 关卡是带叹号的空心大三角（约 50px 宽），普通怪最宽约 26px。EX 要手动操作，挂机打不过，不打
-MINIMAP_EX_MIN_WIDTH = 40
+# EX 关卡是带叹号的空心大三角（约 50x42），普通怪是实心小三角（最大约 28x28）。EX 要手动操作，挂机打不过，不打。
+# 两只普通怪贴在一起时也会合并得很宽，但高度不够、像素占凸包的比例（实心度）也高：
+# EX 实心度 0.14~0.24，普通怪 0.5 以上，两只水平相邻约 0.4
+MINIMAP_EX_MIN_SIZE = (40, 32)
+MINIMAP_EX_MAX_SOLIDITY = 0.35
 # 小地图是斜视的透视图，镜头平移时远处挪得少、近处挪得多，不能直接按平移拼接。
 # 地面网格两组线的消失点连成地平线（小地图局部坐标下的直线 l·(x, y, 1) = 0），
 # 把它送到无穷远就得到仿射校正后的俯视图，此时镜头平移就是纯平移。由多帧网格线拟合。
@@ -30,6 +33,8 @@ CANVAS_SIZE = 3000
 UNKNOWN, BLOCKED, WALK = -1, 0, 1
 # 两次观测之间视野最多平移的距离（校正后像素）
 LOCATE_RANGE = 100
+# 一帧里变化的格子少于这个数视为地图没变（边缘抗锯齿会来回跳），已经探索完毕的结论可以沿用
+MAP_CHANGE_MIN_PIXELS = 50
 # 匹配一致率低于这个值视为换了区域（过场、切区域），重建地图
 LOCATE_MIN_RATIO = 0.85
 # 寻路在降采样的网格上做
@@ -51,6 +56,9 @@ TARGET_SWITCH_RATIO = 0.5
 # 连续这么多次规划，到目标的路径（网格）都没缩短这么多，视为被挡住（比如关着的能量门）
 TARGET_MAX_NO_PROGRESS = 3
 TARGET_PROGRESS_MIN = 4
+# 放弃的未探索边界：附近这个范围内又补全了这么多未知格子，说明那边地图变了，重新允许去
+FRONTIER_BLOCK_PATCH = 24
+FRONTIER_UNBLOCK_PIXELS = 30
 
 # 小地图原始像素到屏幕像素的比例，由小地图红三角和屏幕上敌人位置对照拟合。小地图比主镜头更接近俯视，
 # 竖直方向压缩得少，所以竖直比例更小
@@ -121,7 +129,7 @@ class Minimap:
             if len(xs) < MINIMAP_ENEMY_MIN_AREA:
                 continue
             center = (float(xs.mean()), float(ys.mean()))
-            if stats[index][cv2.CC_STAT_WIDTH] >= MINIMAP_EX_MIN_WIDTH:
+            if self._is_ex(stats[index], xs, ys):
                 ex_raw.append(center)
             else:
                 enemies_raw.append(center)
@@ -141,6 +149,14 @@ class Minimap:
         self.squad = tuple(int(round(v)) for v in rectify_point(self.squad_raw))
         self.enemies = [tuple(int(round(v)) for v in rectify_point(p)) for p in enemies_raw]
         self.ex = [tuple(int(round(v)) for v in rectify_point(p)) for p in ex_raw]
+
+    @staticmethod
+    def _is_ex(stat, xs, ys):
+        min_width, min_height = MINIMAP_EX_MIN_SIZE
+        if stat[cv2.CC_STAT_WIDTH] < min_width or stat[cv2.CC_STAT_HEIGHT] < min_height:
+            return False
+        hull = cv2.convexHull(np.stack([xs, ys], axis=1).astype(np.int32))
+        return len(xs) / max(cv2.contourArea(hull), 1) < MINIMAP_EX_MAX_SOLIDITY
 
     @staticmethod
     def _squad(white):
@@ -163,6 +179,11 @@ class FieldExplorer:
 
     def reset(self):
         self.state = np.full((CANVAS_SIZE, CANVAS_SIZE), UNKNOWN, dtype=np.int8)
+        # 已知区域的外接框 (top, left, bottom, right)，避免每次规划都扫整张画布
+        self.known_box = None
+        # 地图或敌人有实质变化时加一；探索完毕时记下版本，版本不变就不必重新规划
+        self.version = 0
+        self.finished_version = None
         # 当前视野（校正后）左上角在全局地图上的位置
         self.pos = None
         self.minimap = None
@@ -170,7 +191,10 @@ class FieldExplorer:
         self.enemies = []
         self.ex = []
         self.blocked_targets = []
+        # [(x, y), 放弃时附近的未知格子数]
+        self.blocked_frontiers = []
         self.target = None
+        self.target_kind = None
         self.target_stuck = 0
         self.target_best = 0
         self.target_no_progress = 0
@@ -214,6 +238,7 @@ class FieldExplorer:
 
         pos = None
         if self.pos is not None:
+            self._recenter()
             pos = self._locate(minimap)
             if pos is None:
                 self.reset()
@@ -227,10 +252,55 @@ class FieldExplorer:
         x, y = pos
         width, height = RECTIFY_SIZE
         view = self.state[y:y + height, x:x + width]
+        before = view.copy()
         view[minimap.blocked] = BLOCKED
         view[minimap.walk] = WALK
+        if np.count_nonzero(before != view) >= MAP_CHANGE_MIN_PIXELS:
+            self.version += 1
+        box = (y, x, y + height, x + width)
+        if self.known_box is None:
+            self.known_box = box
+        else:
+            top, left, bottom, right = self.known_box
+            self.known_box = (min(top, box[0]), min(left, box[1]), max(bottom, box[2]), max(right, box[3]))
         self._update_enemies(minimap)
         return True
+
+    def _recenter(self):
+        """
+        视野接近画布边缘时把整张地图平移回中间，否则 _locate 越界会把整张地图重置掉
+        """
+        width, height = RECTIFY_SIZE
+        x, y = self.pos
+        margin = LOCATE_RANGE * 2
+        if margin <= x <= CANVAS_SIZE - width - margin and margin <= y <= CANVAS_SIZE - height - margin:
+            return
+        dx = (CANVAS_SIZE - width) // 2 - x
+        dy = (CANVAS_SIZE - height) // 2 - y
+        logger.info(f'Field explore map recenter by {(dx, dy)}')
+
+        def span(d):
+            return slice(max(0, -d), CANVAS_SIZE - max(0, d)), slice(max(0, d), CANVAS_SIZE - max(0, -d))
+
+        (src_y, dst_y), (src_x, dst_x) = span(dy), span(dx)
+        state = np.full_like(self.state, UNKNOWN)
+        state[dst_y, dst_x] = self.state[src_y, src_x]
+        self.state = state
+
+        def move(point):
+            return None if point is None else (point[0] + dx, point[1] + dy)
+
+        self.pos = move(self.pos)
+        self.target = move(self.target)
+        self.last_click_pos = move(self.last_click_pos)
+        self.enemies = [[ex + dx, ey + dy, attempts] for ex, ey, attempts in self.enemies]
+        self.ex = [move(point) for point in self.ex]
+        self.blocked_targets = [move(point) for point in self.blocked_targets]
+        self.blocked_frontiers = [(move(point), unknown) for point, unknown in self.blocked_frontiers]
+        top, left, bottom, right = self.known_box
+        self.known_box = (
+            max(top + dy, 0), max(left + dx, 0), min(bottom + dy, CANVAS_SIZE), min(right + dx, CANVAS_SIZE)
+        )
 
     def _update_enemies(self, minimap):
         x, y = self.pos
@@ -250,6 +320,8 @@ class FieldExplorer:
                 kept.append(enemy)
         for point in seen:
             kept.append([point[0], point[1], 0])
+        if len(kept) != len(self.enemies):
+            self.version += 1
         self.enemies = kept
 
         for ex, ey in minimap.ex:
@@ -257,32 +329,63 @@ class FieldExplorer:
             if all(np.hypot(point[0] - px, point[1] - py) > EX_AVOID_RADIUS for px, py in self.ex):
                 logger.info(f'Field explore found EX {point}, skipped')
                 self.ex.append(point)
+                self.version += 1
 
     def _give_up(self, reason):
-        logger.warning(f'Field explore give up target {self.target}, {reason}')
-        self.blocked_targets.append(self.target)
+        logger.warning(f'Field explore give up {self.target_kind} {self.target}, {reason}')
+        if self.target_kind == 'frontier':
+            self.blocked_frontiers.append((self.target, self._patch_unknown(self.target)))
+        else:
+            self.blocked_targets.append(self.target)
         self.target = None
+        self.target_kind = None
         self.target_stuck = 0
 
-    def skip_target(self):
+    def skip_target(self, point):
         """
-        当前目标打不过（战败），以后不再去
+        Args:
+            point (tuple[int, int]): 打不过（战败）的敌人的全局坐标，以后不再去
         """
-        if self.target is not None:
-            self._give_up('fight failed')
+        logger.warning(f'Field explore skip enemy {point}, fight failed')
+        self.blocked_targets.append(point)
+        if self._is_target(point):
+            self.target = None
+            self.target_kind = None
+            self.target_stuck = 0
 
     def _is_blocked_target(self, point):
         return any(np.hypot(point[0] - bx, point[1] - by) <= TARGET_BLOCK_RADIUS for bx, by in self.blocked_targets)
+
+    def _patch_unknown(self, point):
+        x, y = int(point[0]), int(point[1])
+        r = FRONTIER_BLOCK_PATCH
+        return int(np.count_nonzero(self.state[max(y - r, 0):y + r + 1, max(x - r, 0):x + r + 1] == UNKNOWN))
+
+    def _is_blocked_frontier(self, point):
+        """
+        放弃的边界只在附近地图没怎么变时有效，附近补全了说明从别的方向探过来了，边界位置也变了
+        """
+        kept = []
+        blocked = False
+        for frontier, unknown in self.blocked_frontiers:
+            if unknown - self._patch_unknown(frontier) >= FRONTIER_UNBLOCK_PIXELS:
+                logger.info(f'Field explore unblock frontier {frontier}, map changed nearby')
+                continue
+            kept.append((frontier, unknown))
+            if np.hypot(point[0] - frontier[0], point[1] - frontier[1]) <= TARGET_BLOCK_RADIUS:
+                blocked = True
+        self.blocked_frontiers = kept
+        return blocked
 
     def _grid(self, avoid_ex=True):
         """
         Returns:
             tuple: 降采样后的可走网格、外部未知网格、网格左上角在全局地图上的位置
         """
-        known = np.argwhere(self.state != UNKNOWN)
         margin = PLAN_SCALE * 4
-        (top, left), (bottom, right) = known.min(axis=0) - margin, known.max(axis=0) + margin
-        top, left = max(top, 0), max(left, 0)
+        top, left, bottom, right = self.known_box
+        top, left = max(top - margin, 0), max(left - margin, 0)
+        bottom, right = min(bottom + margin, CANVAS_SIZE), min(right + margin, CANVAS_SIZE)
         crop = self.state[top:bottom, left:right]
         h, w = crop.shape[0] // PLAN_SCALE, crop.shape[1] // PLAN_SCALE
         crop = crop[:h * PLAN_SCALE, :w * PLAN_SCALE].reshape(h, PLAN_SCALE, w, PLAN_SCALE)
@@ -301,10 +404,10 @@ class FieldExplorer:
 
         # 当前视野里被图标挡住的地方不算未探索
         x, y = self.pos
-        hidden = np.zeros(self.state.shape, dtype=bool)
+        hidden = np.zeros((bottom - top, right - left), dtype=bool)
         width, height = RECTIFY_SIZE
-        hidden[y:y + height, x:x + width] = self.minimap.hidden
-        hidden = hidden[top:top + h * PLAN_SCALE, left:left + w * PLAN_SCALE]
+        hidden[y - top:y - top + height, x - left:x - left + width] = self.minimap.hidden
+        hidden = hidden[:h * PLAN_SCALE, :w * PLAN_SCALE]
         hidden = hidden.reshape(h, PLAN_SCALE, w, PLAN_SCALE).any(axis=(1, 3))
         unknown &= ~hidden
         # 只算连着地图外面的未知区域，已探索区域中间被图标挡出来的洞不算
@@ -396,7 +499,7 @@ class FieldExplorer:
             nearest = np.argmin(dist[ys, xs])
             cell = (int(xs[nearest]), int(ys[nearest]))
             point = (left + cell[0] * PLAN_SCALE, top + cell[1] * PLAN_SCALE)
-            if self._is_blocked_target(point):
+            if self._is_blocked_target(point) or self._is_blocked_frontier(point):
                 continue
             frontiers.append((dist[cell[1], cell[0]], cell, 'frontier', point))
         return sorted(frontiers, key=lambda c: c[0])
@@ -433,10 +536,10 @@ class FieldExplorer:
         else:
             self.target_no_progress += 1
             if self.target_no_progress >= TARGET_MAX_NO_PROGRESS:
-                self.target = goal
-                self._give_up(f'{kind} path {length * PLAN_SCALE} not getting shorter')
+                self.target, self.target_kind = goal, kind
+                self._give_up(f'path {length * PLAN_SCALE} not getting shorter')
                 return None
-        self.target = goal
+        self.target, self.target_kind = goal, kind
         return chosen
 
     def _to_screen(self, point, squad_screen):
@@ -459,27 +562,32 @@ class FieldExplorer:
         Returns:
             tuple | None: (屏幕坐标, 类型)，类型为 'enemy' 时点击即接战；None 表示探索完毕
         """
+        # 探索完毕后地图和敌人都没变，结论不变，不用每帧重新寻路
+        if self.finished_version == self.version:
+            return None
         sx, sy = self.squad_canvas
-        while 1:
-            # 小队贴着 EX 时绕行区会把出路堵死，这时允许从 EX 旁边穿过去
-            for avoid_ex in (True, False):
-                walk, unknown, origin = self._grid(avoid_ex=avoid_ex)
-                left, top = origin
-                start = self._nearest(walk, ((sx - left) // PLAN_SCALE, (sy - top) // PLAN_SCALE), 6)
-                if start is None:
-                    continue
-                dist = self._distance(walk, start)
+        chosen = None
+        # 小队贴着 EX 时绕行区会把出路堵死，这时允许从 EX 旁边穿过去
+        for avoid_ex in (True, False):
+            walk, unknown, origin = self._grid(avoid_ex=avoid_ex)
+            left, top = origin
+            start = self._nearest(walk, ((sx - left) // PLAN_SCALE, (sy - top) // PLAN_SCALE), 6)
+            if start is None:
+                continue
+            dist = self._distance(walk, start)
+            # 目标被放弃时只需重新挑目标，网格和距离不变
+            while 1:
                 candidates = self._candidates(unknown, origin, dist)
-                if candidates or not self.ex:
+                if not candidates:
                     break
-            else:
-                return None
-            if not candidates:
-                return None
-            chosen = self._choose(candidates)
-            # 目标刚被放弃，换下一个重新规划
-            if chosen is not None:
+                chosen = self._choose(candidates)
+                if chosen is not None:
+                    break
+            if chosen is not None or not self.ex:
                 break
+        if chosen is None:
+            self.finished_version = self.version
+            return None
         _, cell, kind, goal = chosen
         self.last_click_pos = (sx, sy)
 
