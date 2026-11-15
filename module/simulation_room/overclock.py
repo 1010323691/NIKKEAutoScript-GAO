@@ -550,6 +550,8 @@ class Overclock(UI):
             self.handle_failed()
         except OperationFailed:
             logger.warning('failed to overcome the current battle, will skip simulation task')
+            # 战斗详情面板会挡住返回按钮，退出时可能卡住触发重启；先推迟任务，避免重启后再次进入同一场打不过的战斗
+            self.config.task_delay(schedule=True)
             self.handle_failed()
         except OperationAlreadyDone:
             pass
