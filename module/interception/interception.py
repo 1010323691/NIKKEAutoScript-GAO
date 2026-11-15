@@ -18,8 +18,8 @@ from module.interception.data import (
 from module.logger import logger
 from module.ocr.ocr import Digit
 from module.simulation_room.assets import AUTO_BURST, AUTO_SHOOT, END_FIGHTING, PAUSE
-from module.ui.assets import INTERCEPTION_CHECK
-from module.ui.page import page_interception
+from module.ui.assets import ARK_GOTO_INTERCEPTION, INTERCEPTION_CHECK
+from module.ui.page import page_ark, page_interception
 from module.ui.ui import UI
 from module.warehouse_stats.assets import CUSTOM_MODULE_TEMPLATE, ITEM_NUM_PREFIX
 from module.warehouse_stats.warehouse_stats import WarehouseStats
@@ -470,8 +470,46 @@ class Interception(UI):
         if ok:
             logger.info(f'InterceptionStats: record saved, boss={boss}, stone_count={stone_count}, csv={csv_path}')
 
+    def enter_abnormal_interception(self, skip_first_screenshot=True) -> bool:
+        """
+        拦截战入口默认停在普通拦截战页签，page_interception 只认异常个体拦截战页签，
+        所以不能直接 ui_ensure，需要在这里切页签并识别未解锁状态。
+
+        Returns:
+            bool: 是否进入异常个体拦截战，False 表示该功能未解锁
+        """
+        self.ui_ensure(page_ark)
+        click_timer = Timer(0.3)
+        while 1:
+            if skip_first_screenshot:
+                skip_first_screenshot = False
+            else:
+                self.device.screenshot()
+
+            if self.appear(INTERCEPTION_CHECK, offset=(30, 30)):
+                self.ui_current = page_interception
+                return True
+            if self.appear(ABNORMAL_INTERCEPTION_LOCKED, offset=(20, 20)):
+                logger.warning('Abnormal interception is locked')
+                return False
+            if click_timer.reached() and self.appear(INTERCEPTION_NORMAL_CHECK, offset=(20, 20), interval=2):
+                logger.info('Click %s @ %s' % (point2str(620, 1160), 'ABNORMAL_INTERCEPTION_TAB'))
+                self.device.click_xy(620, 1160)
+                click_timer.reset()
+                continue
+            if (
+                click_timer.reached()
+                and self.ui_page_appear(page_ark)
+                and self.appear_then_click(ARK_GOTO_INTERCEPTION, offset=(30, 30), interval=3)
+            ):
+                click_timer.reset()
+                continue
+
     def run(self):
-        self.ui_ensure(page_interception)
+        if not self.enter_abnormal_interception():
+            self.ui_goto_main()
+            self.config.task_delay(server_update=True)
+            return
         try:
             self._run()
         except NoOpportunity:
