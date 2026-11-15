@@ -72,6 +72,15 @@ class Commission(UI):
                 click_timer.reset()
                 continue
 
+            # 关闭奖励弹窗的点击可能落到派遣公告栏上，打开派遣选择窗口，后续流程都要求在派遣主页
+            if click_timer.reached() and self.appear(ITEM_LIST_CHECK, offset=(70, 10)):
+                logger.info('Click %s @ %s' % (point2str(652, 184), 'CLOSE_DISPATCH_LIST'))
+                self.device.click_xy(652, 184)
+                click_timer.reset()
+                confirm_timer.clear()
+                self.device.sleep(1)
+                continue
+
             # 领取完成弹出的提示
             if self.appear(CLAIM_DONE_NOTICE, offset=30):
                 logger.info('Receive commission done')
