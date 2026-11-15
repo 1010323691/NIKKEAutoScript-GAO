@@ -1,5 +1,6 @@
 from module.base.decorator import run_once
 from module.base.timer import Timer
+from module.daily_recruit.assets import RECRUIT_CONFIRM, RECRUIT_SKIP
 from module.exception import GameNotRunningError, GamePageUnknownError, GameStart
 from module.handler.assets import *
 from module.handler.info_handle import InfoHandler
@@ -138,6 +139,13 @@ class UI(InfoHandler):
             logger.info('Unknown ui page')
             # 加载画面
             if self.appear_then_click(GOTO_MAIN, offset=(30, 30), interval=2):
+                timeout.reset()
+                continue
+            # 招募中途被中断时会停在跳过动画或结果页，两者都没有返回按钮
+            if self.appear_then_click(RECRUIT_SKIP, offset=(30, 30), interval=2, static=False):
+                timeout.reset()
+                continue
+            if self.appear_then_click(RECRUIT_CONFIRM, offset=(30, 30), interval=2, static=False):
                 timeout.reset()
                 continue
             if self.ui_additional():
