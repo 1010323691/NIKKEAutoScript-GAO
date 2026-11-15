@@ -171,7 +171,9 @@ class Coop(UI):
             else:
                 self.device.screenshot()
 
-            if self.appear(MAIN_CHECK, offset=10) and self.appear_then_click(COOP, offset=10, interval=3, static=False):
+            if self.appear(MAIN_CHECK, offset=10) and self.appear_then_click(
+                COOP, offset=10, interval=3, threshold=0.85, static=False
+            ):
                 logger.info('Enter Coop')
                 continue
 
