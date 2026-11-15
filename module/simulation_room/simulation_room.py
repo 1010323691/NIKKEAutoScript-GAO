@@ -3,7 +3,7 @@ from functools import cached_property
 from module.base.timer import Timer
 from module.base.utils import _area_offset, crop, point2str
 from module.exception import GamePageUnknownError, GameStuckError, OperationFailed
-from module.handler.assets import CONFIRM_B
+from module.handler.assets import CONFIRM_A, CONFIRM_B
 from module.logger import logger
 from module.simulation_room.assets import *
 from module.tribe_tower.assets import BACK
@@ -277,7 +277,13 @@ class SimulationRoom(UI):
         try:
             if not self.appear(SIMULATION_ROOM_CHECK, offset=(30, 30)):
                 self.ui_ensure(page_ark)
-            self.ensure_into_simulation()
+            try:
+                self.ensure_into_simulation()
+            except GamePageUnknownError:
+                # 任务中断后会停在进行中的模拟里，无法得知当前区域，结束后重新开始
+                logger.warning('The simulation has already been started, end it and restart')
+                self.quit_simulation()
+                self.ensure_into_simulation()
             self._run()
         except GamePageUnknownError:
             logger.error('The simulation has already been started')
@@ -454,6 +460,42 @@ class SimulationRoom(UI):
 
             if not self.appear(END_SIMULATION, offset=(100, 30), static=False) and confirm_timer.reached():
                 break
+
+    def quit_simulation(self, skip_first_screenshot=True):
+        """中途放弃进行中的模拟，回到模拟室首页"""
+        logger.info('Quit the current simulation')
+        click_timer = Timer(0.3)
+        while 1:
+            if skip_first_screenshot:
+                skip_first_screenshot = False
+            else:
+                self.device.screenshot()
+
+            if self.appear(SIMULATION_ROOM_CHECK, offset=(5, 5)):
+                break
+
+            if click_timer.reached() and self.appear(END_SIMULATION_CHECK, offset=(30, 30), static=False):
+                self.device.click_xy(520, 800)
+                logger.info('Click %s @ %s' % (point2str(520, 800), 'END_SIMULATION_CONFIRM'))
+                click_timer.reset()
+                continue
+
+            if click_timer.reached() and self.appear(SKIP_CHECK, offset=(30, 30), interval=5, static=False):
+                self.device.click_xy(530, 800)
+                logger.info('Click %s @ %s' % (point2str(530, 800), 'SKIP'))
+                click_timer.reset()
+                continue
+
+            if click_timer.reached() and self.appear_then_click(SIMULATION_QUIT, offset=(20, 20), interval=3):
+                click_timer.reset()
+                continue
+
+            if click_timer.reached() and (
+                self.appear_then_click(CONFIRM_A, offset=(30, 30), interval=3, static=False)
+                or self.appear_then_click(CONFIRM_B, offset=(30, 30), interval=3, static=False)
+            ):
+                click_timer.reset()
+                continue
 
     def end_simulation(self, skip_first_screenshot=True):
         logger.info('already arrived the end area')
