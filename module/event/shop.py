@@ -120,6 +120,7 @@ class EventShop(EventBase):
                         break
 
                 quit = False
+                max_clicked = False
                 confirm_timer = Timer(1, count=3)
                 while 1:
                     self.device.screenshot()
@@ -192,10 +193,13 @@ class EventShop(EventBase):
                         quit = True
                         continue
 
-                    # 点击max
-                    if click_timer.reached() and self.appear_then_click(
-                        SHOP_BUY_MAX, offset=30, threshold=0.99, interval=1
+                    # 点击max；数量已是上限时 MAX 置灰但仍能匹配，只点一次，否则会一直抢在购买前面
+                    if (
+                        not max_clicked
+                        and click_timer.reached()
+                        and self.appear_then_click(SHOP_BUY_MAX, offset=30, threshold=0.99, interval=1)
                     ):
+                        max_clicked = True
                         click_timer.reset()
                         continue
 
