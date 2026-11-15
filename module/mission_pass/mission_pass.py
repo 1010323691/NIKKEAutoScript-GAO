@@ -5,7 +5,7 @@ import cv2
 from module.base.button import shift_button
 from module.base.langs import Langs
 from module.base.timer import Timer
-from module.base.utils import crop
+from module.base.utils import crop, get_color
 from module.handler.assets import REWARD
 from module.logger import logger
 from module.mission_pass.assets import *
@@ -15,6 +15,22 @@ from module.ui.ui import UI
 
 
 class MissionPass(UI):
+    @staticmethod
+    def _pass_tab_red(image, area) -> bool:
+        r, g, _ = get_color(image, area)
+        return r > g + 60
+
+    def pass_reward_tab_selected(self) -> bool:
+        # 选中的页签是红色胶囊；奖励可领取时页签文字上叠着动态光效，OCR 经常读不出“普通奖励”
+        if self._pass_tab_red(self.device.image, (70, 405, 100, 430)):
+            return True
+        return self.appear_text(Langs.PASS_REWARD_TAB, threshold=1)
+
+    def pass_mission_tab_selected(self) -> bool:
+        if self._pass_tab_red(self.device.image, (620, 405, 650, 430)):
+            return True
+        return self.appear_text(Langs.PASS_MISSION_TAB, threshold=1)
+
     def receive(self, skip_first_screenshot=True):
         logger.hr('Receive pass', 2)
 
@@ -28,7 +44,7 @@ class MissionPass(UI):
             if (
                 self.appear(MISSION_RED_POINT, offset=(-25, -50, 10, 50))
                 # 当前在奖励标签页
-                and self.appear_text(Langs.PASS_REWARD_TAB, threshold=1)
+                and self.pass_reward_tab_selected()
             ):
                 # 点击相对于红点的偏移位置
                 self.appear_then_click(
@@ -41,16 +57,14 @@ class MissionPass(UI):
                 not self.appear(MISSION_RED_POINT, offset=(-25, -50, 10, 50))
                 and self.appear(REWARD_RED_POINT, offset=(-25, -50, 10, 50))
                 # 当前在任务标签页
-                and not self.appear_text(Langs.PASS_REWARD_TAB, threshold=1)
+                and self.pass_mission_tab_selected()
             ):
                 # 点击相对于红点的偏移位置
                 self.appear_then_click(REWARD_RED_POINT, offset=(-25, -50, 10, 50), click_offset=(-150, 20), interval=1)
                 continue
 
             # 任务全部领取
-            if self.appear(MISSION_RED_POINT, offset=(-25, -50, 10, 50)) and self.appear_text(
-                Langs.PASS_MISSION_TAB, threshold=1
-            ):
+            if self.appear(MISSION_RED_POINT, offset=(-25, -50, 10, 50)) and self.pass_mission_tab_selected():
                 if self.appear_text_then_click(Langs.CLAIM_ALL, threshold=0.7, interval=1):
                     self.device.sleep(1)
                 logger.info('Reward pass mission')
@@ -64,7 +78,7 @@ class MissionPass(UI):
             if (
                 not self.appear(MISSION_RED_POINT, offset=(-25, -50, 10, 50))
                 and self.appear(REWARD_RED_POINT, offset=(-25, -50, 10, 50))
-                and self.appear_text(Langs.PASS_REWARD_TAB, threshold=1)
+                and self.pass_reward_tab_selected()
             ):
                 if self.appear_text_then_click(Langs.CLAIM_ALL, threshold=0.7, interval=1):
                     self.device.sleep(1)
