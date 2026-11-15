@@ -1,4 +1,5 @@
 from module.base.timer import Timer
+from module.base.utils import crop, point2str
 from module.logger import logger
 from module.simulation_room.assets import AUTO_BURST, AUTO_SHOOT, END_FIGHTING, PAUSE
 from module.solo_raid.assets import *
@@ -63,15 +64,38 @@ class SoloRaid(SoloRaidChallenge):
         else:
             logger.warning('There are no free opportunities for normal mode')
 
+    # 编队页 TEAM SET 01-05 页签
+    TEAM_SET_BUTTONS = [(339, 860), (415, 860), (490, 860), (566, 860), (641, 860)]
+
+    def team_has_unavailable_nikke(self) -> bool:
+        # 单人突击每个妮姬每天只能出战一次，用过的妮姬会盖上“无法选择”
+        return TEMPLATE_NIKKE_UNAVAILABLE.match(crop(self.device.image, (40, 900, 700, 1030)), similarity=0.75)
+
     def solo_raid(self, skip_first_screenshot=True):
         """普通模式战斗/扫荡"""
         logger.hr('Start a solo raid (Normal)')
+        team_index = 0
+        team_timer = Timer(1.5)
 
         while 1:
             if skip_first_screenshot:
                 skip_first_screenshot = False
             else:
                 self.device.screenshot()
+
+            # 当前编队有已出战的妮姬，切到下一个编队；全部编队都不可用时结束
+            if self.appear(FIGHT_HISTORY, offset=10) and self.team_has_unavailable_nikke():
+                if not team_timer.reached():
+                    continue
+                team_index += 1
+                if team_index >= len(self.TEAM_SET_BUTTONS):
+                    logger.warning('All team sets contain nikkes already used today, stop solo raid')
+                    raise NoOpportunityRemain
+                button = self.TEAM_SET_BUTTONS[team_index]
+                logger.info('Click %s @ %s' % (point2str(*button), f'TEAM_SET_{team_index + 1}'))
+                self.device.click_xy(*button)
+                team_timer.reset()
+                continue
 
             # 第七关扫荡
             if (
