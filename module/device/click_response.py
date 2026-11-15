@@ -45,7 +45,14 @@ def locked_banner_appear(image) -> bool:
             band = gray[top + gap + 2:bottom - gap - 2]
             if not band.size:
                 continue
-            if np.count_nonzero(band[:, center] > 200) < band[:, center].size * 0.005:
+            white = np.count_nonzero(band[:, center] > 200)
+            if white < band[:, center].size * 0.005:
+                continue
+            # 白色弹窗（模拟室结果、增益选择等）同样有贯穿的上下沿，但带内是亮底；横幅是压暗的黑带，只有少量白字
+            if white > band[:, center].size * 0.3:
+                continue
+            around = min(gray[max(top - 20, 0):top - gap].mean(), gray[bottom + gap:bottom + 20].mean())
+            if band.mean() > around * 0.75:
                 continue
             return True
     return False
@@ -79,10 +86,16 @@ class ClickResponse:
     _click_response_name = None
     _click_response_time = 0.
     _click_response_hits = None
+    # 登录流程里关闭公告等操作会弹出同样外观的普通提示，且不存在未解锁入口，期间不做检测
+    click_response_enabled = True
 
     def click_response_record(self, button: Button):
         """在点击完成后调用"""
-        self._click_response_name = str(button)
+        name = str(button)
+        # 未解锁入口会被连续重复点击；中间点过其他按钮说明流程在推进，之前的命中多半是普通提示
+        if self._click_response_hits and name not in self._click_response_hits:
+            self._click_response_hits = None
+        self._click_response_name = name
         self._click_response_time = time.time()
 
     def click_response_check(self):
@@ -94,6 +107,9 @@ class ClickResponse:
         """
         name = self._click_response_name
         if name is None:
+            return
+        if not self.click_response_enabled:
+            self._click_response_name = None
             return
         if time.time() - self._click_response_time > self.click_response_window:
             self._click_response_name = None

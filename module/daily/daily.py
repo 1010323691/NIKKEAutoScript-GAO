@@ -3,6 +3,7 @@ from module.base.timer import Timer
 from module.base.utils import crop, find_center, mask_area, point2str
 from module.conversation.assets import *
 from module.daily.assets import *
+from module.exception import GameClickNoResponseError
 from module.logger import logger
 from module.ui.assets import CONVERSATION_CHECK, DAILY_CHECK, INVENTORY_CHECK
 from module.ui.page import page_conversation, page_daily, page_inventory
@@ -16,6 +17,13 @@ class NoItemsError(Exception):
 class Daily(UI):
     def receive(self, skip_first_screenshot=True):
         logger.hr('Reward receive', 2)
+        try:
+            self._receive(skip_first_screenshot=skip_first_screenshot)
+        except GameClickNoResponseError as e:
+            # 每日点数已满 100 时点领取会弹出“已获得100点。”提示横幅，外形与未解锁横幅相同
+            logger.info(f'Daily points already full, receive done ({e})')
+
+    def _receive(self, skip_first_screenshot=True):
         confirm_timer = Timer(2.7, count=2).start()
         click_timer = Timer(0.3)
         while 1:

@@ -129,6 +129,7 @@ class LoginHandler(UI):
         for _ in range(3):
             self.device.stuck_record_clear()
             self.device.click_record_clear()
+            self.device.click_response_enabled = False
             try:
                 self._handle_app_login()
                 return True
@@ -137,6 +138,9 @@ class LoginHandler(UI):
                 self.device.app_stop()
                 self.device.app_start()
                 continue
+            finally:
+                self.device.click_response_clear()
+                self.device.click_response_enabled = True
 
         logger.critical('Login failed more than 3')
         logger.critical('NIKKE server may be under maintenance, or you may lost network connection')
