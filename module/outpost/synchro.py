@@ -13,9 +13,18 @@ class Synchro(UI):
     def upgrade(self):
         logger.info('Open synchro upgrade window')
         click_timer = Timer(0.3)
+        # 同步器增强要在主力妮姬达到上限后才会出现，未解锁时页面上没有增强按钮
+        unavailable_timer = Timer(5, count=10).start()
+        auto_click = 0
 
         while 1:
             self.device.screenshot()
+
+            if self.appear(SYNCHRO_UPGRADE, offset=30) or self.appear(SYNCHRO_UPGRADE_CHECK, offset=(30, 30)):
+                unavailable_timer.reset()
+            elif unavailable_timer.reached():
+                logger.info('Synchro upgrade button not found, synchro enhancement is not available')
+                raise NoEnoughItems
 
             # 使用道具
             if (
