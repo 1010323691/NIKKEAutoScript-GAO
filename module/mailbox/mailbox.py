@@ -1,6 +1,6 @@
 from module.base.timer import Timer
 from module.logger import logger
-from module.mailbox.assets import RECEIVE
+from module.mailbox.assets import MAIL_DETAIL_CLOSE, RECEIVE
 from module.ui.assets import MAIN_GOTO_MAILBOX
 from module.ui.page import page_mailbox, page_main
 from module.ui.ui import UI
@@ -26,6 +26,13 @@ class Mailbox(UI):
             if self.handle_reward(interval=1):
                 confirm_timer.reset()
                 click_timer.reset()
+                continue
+
+            # handle_reward 的点击位置正好落在邮件列表上，奖励弹窗先消失时会误开邮件详情，
+            # 详情页不属于任何已知页面，不关掉会一直等到 GameStuckError
+            if self.appear_then_click(MAIL_DETAIL_CLOSE, offset=(10, 10), interval=1):
+                logger.info('Close mail detail popup')
+                confirm_timer.reset()
                 continue
 
             if self.appear(page_mailbox.check_button, offset=(10, 10)) and confirm_timer.reached():

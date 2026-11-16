@@ -5,3 +5,4 @@ from module.base.template import Template
 # Don't modify it manually.
 
 RECEIVE = Button(area={'zh-CN': (497, 1074, 592, 1096), 'en-US': (494, 1076, 558, 1095)}, color={'zh-CN': (137, 216, 251), 'en-US': (111, 206, 248)}, button={'zh-CN': (497, 1074, 592, 1096), 'en-US': (494, 1076, 558, 1095)}, file={'zh-CN': './assets/zh-CN/mailbox/RECEIVE.png', 'en-US': './assets/en-US/mailbox/RECEIVE.png'})
+MAIL_DETAIL_CLOSE = Button(area={'zh-CN': (643, 189, 676, 222), 'en-US': (643, 189, 676, 222)}, color={'zh-CN': (212, 212, 212), 'en-US': (212, 212, 212)}, button={'zh-CN': (643, 189, 676, 222), 'en-US': (643, 189, 676, 222)}, file={'zh-CN': './assets/zh-CN/mailbox/MAIL_DETAIL_CLOSE.png', 'en-US': './assets/zh-CN/mailbox/MAIL_DETAIL_CLOSE.png'})
