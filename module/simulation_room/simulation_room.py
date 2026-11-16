@@ -274,18 +274,31 @@ class SimulationRoom(UI):
                     return
 
     def run(self):
+        # 只有确认身处模拟室流程后，未知页面才按“模拟进行中”处理；
+        # 此前的未知页面与其他任务一致交给调度器的通用处理，避免误报并把任务推到明天
+        in_simulation = False
         try:
-            if not self.appear(SIMULATION_ROOM_CHECK, offset=(30, 30)):
-                self.ui_ensure(page_ark)
             try:
+                # 停在进行中模拟的关卡弹窗时 ui_ensure 识别不了页面，同样走结束重开
+                if not self.appear(SIMULATION_ROOM_CHECK, offset=(30, 30)):
+                    self.ui_ensure(page_ark)
                 self.ensure_into_simulation()
             except GamePageUnknownError:
                 # 任务中断后会停在进行中的模拟里，无法得知当前区域，结束后重新开始
+                self.device.screenshot()
+                if not self.appear(SIMULATION_QUIT, offset=(20, 20)) and not self.appear(
+                    SIMULATION_ROOM_CHECK, offset=(30, 30)
+                ):
+                    raise
+                in_simulation = True
                 logger.warning('The simulation has already been started, end it and restart')
                 self.quit_simulation()
                 self.ensure_into_simulation()
+            in_simulation = True
             self._run()
         except GamePageUnknownError:
+            if not in_simulation:
+                raise
             logger.error('The simulation has already been started')
             logger.critical('Please end the current simulation and restart it')
             self.handle_failed()
