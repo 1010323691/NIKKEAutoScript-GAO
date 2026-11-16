@@ -5,7 +5,15 @@ from module.exception import GameNotRunningError, GamePageUnknownError, GameStar
 from module.handler.assets import *
 from module.handler.info_handle import InfoHandler
 from module.logger import logger
-from module.ui.assets import ARK_CHECK_ABOVEGROUND, GOTO_MAIN, UI_LOADING_1, UI_LOADING_2, UI_LOADING_3, UI_LOADING_4
+from module.ui.assets import (
+    ARK_CHECK_ABOVEGROUND,
+    FIGHT_CLOSE,
+    GOTO_MAIN,
+    UI_LOADING_1,
+    UI_LOADING_2,
+    UI_LOADING_3,
+    UI_LOADING_4,
+)
 from module.ui.page import (
     Page,
     page_arena,
@@ -148,6 +156,10 @@ class UI(InfoHandler):
             if self.appear_then_click(RECRUIT_CONFIRM, offset=(30, 30), interval=2, static=False):
                 timeout.reset()
                 continue
+            # 任务中断在关卡弹窗（活动/挑战/模拟室）时弹窗会盖住返回大厅按钮，先关弹窗
+            if self.appear_then_click(FIGHT_CLOSE, offset=10, interval=2):
+                timeout.reset()
+                continue
             if self.ui_additional():
                 timeout.reset()
                 continue
@@ -219,6 +231,9 @@ class UI(InfoHandler):
 
         logger.hr(f'UI goto {destination}')
         confirm_timer = Timer(confirm_wait, count=int(confirm_wait // 0.5)).start()
+        # 页面点击间隔为 4s，等待期间已知页面也会判为未匹配；超过该间隔仍无进展才处理弹窗，
+        # 避免在正常切换的过渡帧上误触 ui_additional
+        stuck_timer = Timer(5, count=10).start()
 
         while 1:
             # GOTO_MAIN.clear_offset()
@@ -229,6 +244,7 @@ class UI(InfoHandler):
 
             # Destination page
             if self.ui_page_appear(destination, offset=offset):
+                stuck_timer.reset()
                 if confirm_timer.reached():
                     logger.info(f'Page arrive: {destination}')
                     break
@@ -255,6 +271,13 @@ class UI(InfoHandler):
                     break
 
             if clicked:
+                stuck_timer.reset()
+                continue
+
+            # 上个任务的领取奖励等弹窗可能延迟出现并盖住页面，不处理会一直等到 GameStuckError
+            if stuck_timer.reached() and self.ui_additional():
+                confirm_timer.reset()
+                stuck_timer.reset()
                 continue
 
     def ui_ensure(self, destination, confirm_wait=0, skip_first_screenshot=True):
