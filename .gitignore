@@ -32,3 +32,6 @@ dev_tools/.template_capture_config.json
 # GitHub wiki 本地克隆（独立仓库，勿提交）
 doc/wiki/
 doc/NIKKEAutoScript.wiki/
+# NIKKE_Interactive.ps1 的自查报告与隔离区，含本机信息
+scripts/windows/scan-reports/
+scripts/windows/quarantine-*/
