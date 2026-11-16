@@ -5,7 +5,7 @@ from module.base.timer import Timer
 from module.config.event_stage import resolve_event_stage
 from module.event.assets import *
 from module.logger import logger
-from module.ui.assets import GOTO_BACK
+from module.ui.assets import FIGHT_CLOSE, GOTO_BACK
 from module.ui.ui import UI
 
 
@@ -129,6 +129,15 @@ class EventBase(UI):
                     break
             else:
                 event_timer.clear()
+
+            # 挑战关扫荡后会弹出下一关的关卡弹窗，盖住返回按钮
+            if (
+                click_timer.reached()
+                and not self.appear(self.event_assets.EVENT_CHECK, offset=(30, 30))
+                and self.appear_then_click(FIGHT_CLOSE, offset=10, interval=2)
+            ):
+                click_timer.reset()
+                continue
 
             if (
                 click_timer.reached()
