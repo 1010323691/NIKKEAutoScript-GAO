@@ -225,6 +225,25 @@ class WinClient:
                 logger.error(f'Failed to change screen orientation: {e}')
 
     @staticmethod
+    def wait_window_responsive(hwnd, timeout=600):
+        """
+        游戏卡顿无响应时 ShowWindow/SetWindowPos 会同步阻塞且日志无任何输出。
+        这类卡顿通常一两分钟内自行恢复，不能改成异步快速失败：失败会走启动重试杀掉游戏，
+        而当前重启游戏要十几分钟。因此先显式等待窗口恢复响应，超时才视为异常。
+        """
+        user32 = ctypes.windll.user32
+        if not user32.IsHungAppWindow(hwnd):
+            return
+        hwnd_hex = hex(hwnd) if isinstance(hwnd, int) else hwnd
+        logger.warning(f'Window {hwnd_hex} is not responding, waiting up to {timeout}s for it to recover')
+        start = time.time()
+        while user32.IsHungAppWindow(hwnd):
+            if time.time() - start > timeout:
+                raise Exception(f'Window {hwnd_hex} not responding for over {timeout}s')
+            time.sleep(1)
+        logger.info(f'Window {hwnd_hex} recovered after {int(time.time() - start)}s')
+
+    @staticmethod
     def set_foreground_window_with_retry(hwnd):
         """尝试将窗口设置为前台，失败时先最小化再恢复"""
         hwnd_hex = hex(hwnd) if isinstance(hwnd, int) else hwnd
@@ -233,6 +252,7 @@ class WinClient:
         # 目标已是前台且未最小化时直接返回：否则任务循环每次都会重复激活窗口，干扰用户正常操作
         if user32.GetForegroundWindow() == hwnd and not user32.IsIconic(hwnd):
             return
+        WinClient.wait_window_responsive(hwnd)
         logger.debug(f'Attempting to set window {hwnd_hex} to foreground.')
 
         def toggle_window_state(hwnd, minimize=False):
@@ -644,6 +664,7 @@ class WinClient:
             if hwnd == 0:
                 logger.error('Window not found')
                 raise Exception('Window not found')
+            self.wait_window_responsive(hwnd)
             rect = win32gui.GetClientRect(hwnd)
             window_rect = win32gui.GetWindowRect(hwnd)
             logger.debug(f'Original window rect: {window_rect}, Client rect: {rect}')
@@ -696,6 +717,8 @@ class WinClient:
             if result == 0:
                 logger.error('Failed to set window size')
                 raise Exception('Failed to set window size')
+            # 窗口位置变了，旧截图记录的偏移已失效，下次点击前需重新截图
+            self.current_window.image = None
 
             # 验证设置是否成功
             new_rect = win32gui.GetClientRect(hwnd)
@@ -730,6 +753,7 @@ class WinClient:
             if hwnd == 0:
                 logger.error('Window not found')
                 raise Exception('Window not found')
+            self.wait_window_responsive(hwnd)
 
             # 获取窗口的 DPI（Win10+ 支持）
             try:
@@ -802,6 +826,8 @@ class WinClient:
             if result == 0:
                 logger.error('Failed to set window size')
                 raise Exception('Failed to set window size')
+            # 窗口位置变了，旧截图记录的偏移已失效，下次点击前需重新截图
+            self.current_window.image = None
 
             # 验证客户区大小
             new_rect = win32gui.GetClientRect(hwnd)

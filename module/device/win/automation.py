@@ -203,6 +203,16 @@ class Automation:
 
         raise ScreenshotSizeError('The game window display size must be 720*1280')
 
+    def _window_offset(self):
+        """
+        窗口左上角的屏幕坐标只在截图时更新，新建 Device 后未截图就点击会以 (0, 0)
+        为基准点到桌面上，因此先补一次截图。
+        直接调用本类截图，避免 Device.screenshot 的卡死/点击响应检查被这次补截图触发。
+        """
+        if self.current_window.image is None:
+            Automation.screenshot(self)
+        return self.current_window.offset
+
     def click(self, button: Button, click_offset=0, action='click', random_offset=None):
         """点击窗口中的按钮"""
         x, y = button.location
@@ -225,8 +235,9 @@ class Automation:
         x, y = ensure_int(x, y)
         logger.info('Click %s @ %s' % (point2str(x, y), button))
 
-        x += self.current_window.offset[0]
-        y += self.current_window.offset[1]
+        ox, oy = self._window_offset()
+        x += ox
+        y += oy
         # x, y = self.calculate_click_position(coordinates, offset)
         # 动作到方法的映射
         action_map = {
@@ -242,8 +253,9 @@ class Automation:
             raise ValueError(f'未知的动作类型: {action}')
 
     def long_click_minitouch(self, x, y, duration=1.0, action='hold'):
-        x += self.current_window.offset[0]
-        y += self.current_window.offset[1]
+        ox, oy = self._window_offset()
+        x += ox
+        y += oy
         # 动作到方法的映射
         action_map = {
             'hold': self.press_mouse_click,
@@ -261,13 +273,15 @@ class Automation:
         self.long_click_minitouch(x, y, duration=duration)
 
     def drag_xy(self, p1, p2):
-        p1 = p1[0] + self.current_window.offset[0], p1[1] + self.current_window.offset[1]
-        p2 = p2[0] + self.current_window.offset[0], p2[1] + self.current_window.offset[1]
+        ox, oy = self._window_offset()
+        p1 = p1[0] + ox, p1[1] + oy
+        p2 = p2[0] + ox, p2[1] + oy
         self.mouse_swipe(p1, p2, speed=5)
 
     def click_minitouch(self, x, y, action='click'):
-        x += self.current_window.offset[0]
-        y += self.current_window.offset[1]
+        ox, oy = self._window_offset()
+        x += ox
+        y += oy
         # 动作到方法的映射
         action_map = {
             'click': self.mouse_click,
@@ -284,9 +298,10 @@ class Automation:
         p1, p2 = ensure_int(p1, p2)
         logger.info('%s %s -> %s' % (method, point2str(*p1), point2str(*p2)))
 
-        p1 = p1[0] + self.current_window.offset[0], p1[1] + self.current_window.offset[1]
+        ox, oy = self._window_offset()
+        p1 = p1[0] + ox, p1[1] + oy
         if method == 'scroll':
-            p2 = p2[0] + self.current_window.offset[0], p2[1] + self.current_window.offset[1]
+            p2 = p2[0] + ox, p2[1] + oy
             start_x, start_y = p1
             end_x, end_y = p2
             horizontal = abs(end_x - start_x) > abs(end_y - start_y)
@@ -304,7 +319,7 @@ class Automation:
         elif method == 'swipe':
             # 使用鼠标滑动
             # 原始目标点
-            raw_p2 = (p2[0] + self.current_window.offset[0], p2[1] + self.current_window.offset[1])
+            raw_p2 = (p2[0] + ox, p2[1] + oy)
             dx, dy = raw_p2[0] - p1[0], raw_p2[1] - p1[1]
 
             # 判断主要滑动方向
