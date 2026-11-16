@@ -110,6 +110,8 @@ class Login(LauncherOcr, Automation):
                 logger.info('Clicked Login')
 
         confirm_timer = Timer(60, count=20)
+        # 点击启动后游戏可能要十几分钟才出窗口，沿用 60s 会在加载中途杀掉游戏重试，永远进不去
+        game_timer = Timer(20 * 60, count=20)
         check_game = False
         while True:
             time.sleep(3)
@@ -132,6 +134,8 @@ class Login(LauncherOcr, Automation):
 
                 if self.appear_text_then_click(Langs.LANUCHER_LAUNCH, threshold=0.9):
                     logger.info('Clicked Start')
+                    if not check_game:
+                        game_timer.start()
                     check_game = True
                     continue
                 if self.appear_text_then_click(Langs.LANUCHER_UPDATE, threshold=0.9):
@@ -140,7 +144,20 @@ class Login(LauncherOcr, Automation):
             finally:
                 if not confirm_timer.started():
                     confirm_timer.start()
-                if confirm_timer.reached():
+                # 启动器已不显示“启动”（游戏进程已被上一轮拉起、启动器最小化）时也要按游戏加载等待，
+                # 否则 60s 超时会在加载中途杀掉游戏
+                if not check_game:
+                    self.current_window = self.game
+                    if self.check_program():
+                        logger.info('Game process is running, waiting for game window')
+                        check_game = True
+                        game_timer.start()
+                    self.current_window = self.launcher
+                if check_game:
+                    if game_timer.reached():
+                        logger.error('Game window not shown 20 min after launch, unknown error')
+                        raise RequestHumanTakeover
+                elif confirm_timer.reached():
                     logger.error('Game login timeout, unknown error')
                     raise RequestHumanTakeover
 
