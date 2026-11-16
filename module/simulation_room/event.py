@@ -1,5 +1,6 @@
 from module.base.timer import Timer
 from module.base.utils import point2str
+from module.event.assets import SAVE_TEAM, STAGE_TEAM_NOT_SELECT, TEAM_NIKKE_AUTO, TEAM_NIKKE_NOT_SELECT_5
 from module.exception import OperationFailed
 from module.handler.assets import CONFIRM_B
 from module.logger import logger
@@ -12,6 +13,35 @@ class EventBase(UI):
     def __init__(self, button, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.button = button
+
+    def team_up(self):
+        """
+        模拟室编队为空时进入战斗按钮点了没反应，会一直重复点 FIGHT；
+        进编队页用自动编队补满再保存。
+
+        Returns:
+            bool: 编队已满并回到关卡弹窗为 True；
+                自动编队补不满（可用妮姬不足）超时为 False
+        """
+        logger.hr('Simulation room team up', 3)
+        timeout = Timer(60, count=60).start()
+        saved = False
+        while 1:
+            self.device.screenshot()
+            if timeout.reached():
+                logger.warning('Simulation room team up timeout')
+                return False
+
+            team_full = not self.appear(STAGE_TEAM_NOT_SELECT, offset=(30, 30))
+            if saved and team_full and self.appear(FIGHT, offset=(30, 30)):
+                logger.info('Simulation room team up done')
+                return True
+            if self.appear(TEAM_NIKKE_NOT_SELECT_5, offset=(30, 30)):
+                self.appear_then_click(TEAM_NIKKE_AUTO, offset=(10, 10), interval=2)
+            elif self.appear_then_click(SAVE_TEAM, offset=(30, 30), interval=2):
+                saved = True
+            else:
+                self.appear_then_click(STAGE_TEAM_NOT_SELECT, offset=(30, 30), interval=2)
 
     def get_effect(self):
         for x in range(3):
@@ -65,6 +95,18 @@ class EnemyEvent(EventBase):
                 FIGHT_QUICKLY, offset=(30, 30), interval=5, threshold=0.85
             ):
                 skip = True
+                click_timer.reset()
+                continue
+
+            elif (
+                not skip
+                and click_timer.reached()
+                and self.appear(FIGHT, offset=(30, 30))
+                and self.appear(STAGE_TEAM_NOT_SELECT, offset=(30, 30))
+            ):
+                # 补不满编队时继续点 FIGHT 也没反应，按战斗失败处理，交给上层跳过模拟室
+                if not self.team_up():
+                    raise OperationFailed
                 click_timer.reset()
                 continue
 
