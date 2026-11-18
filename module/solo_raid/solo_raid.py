@@ -37,7 +37,7 @@ class SoloRaid(SoloRaidChallenge):
             if (
                 click_timer.reached()
                 and self.appear(MAIN_CHECK, offset=10)
-                and self.appear_then_click(SOLO_RAID, offset=10, interval=3, static=False)
+                and self.appear_then_click(SOLO_RAID, offset=10, interval=2, static=False)
             ):
                 logger.info('Enter solo raid')
                 continue
@@ -123,7 +123,7 @@ class SoloRaid(SoloRaidChallenge):
             if (
                 self.appear(SOLO_RAID_CHECK, offset=10)
                 and self.appear(CHALLENGE_QUICKLY_DISABLE, threshold=10)
-                and self.appear_then_click(CHALLENGE, threshold=10, interval=2)
+                and self.appear_then_click(CHALLENGE, threshold=10, interval=1)
             ):
                 continue
 

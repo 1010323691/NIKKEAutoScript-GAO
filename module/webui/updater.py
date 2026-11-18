@@ -1,12 +1,16 @@
 import datetime
+import os
+import signal
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Generator, List, Tuple
 
 import requests
 from deploy.config import ExecutionError
 from deploy.git import GitManager, MergeBlocked
+from deploy.mirrorchyan import MirrorError
 from deploy.pip import PipManager
 from deploy.utils import DEPLOY_CONFIG
 from module.base.retry import retry
@@ -45,12 +49,15 @@ class Updater(DeployConfig, GitManager, PipManager):
         # the SPA via /api/system/update so a failure is not silently shown
         # as "up to date".
         self.check_error = ''
+        self.update_error = ''
+        self.source_info = {}
         # Results of the last successful check, reused by status polling, the
         # scheduled task and the update itself instead of asking git again.
         self.source = None
         self.merge_mode = False
         self._update_checked = False
         self._fetch_error = ''
+        self._operation_lock = threading.Lock()
 
     @property
     def delay(self):
@@ -79,12 +86,12 @@ class Updater(DeployConfig, GitManager, PipManager):
                 logger.warning(f'Invalid AutoRestartTime: {t!r}, scheduled restart disabled')
                 return None
 
-    def execute_output(self, command) -> str:
+    def execute_output(self, command, cwd=None) -> str:
         command = command.replace(r"\\", "/").replace("\\", "/").replace('"', '"')
-        result = subprocess.run(command, capture_output=True, shell=True)
+        result = subprocess.run(command, capture_output=True, shell=True, cwd=cwd)
         return _decode_output(result.stdout)
 
-    def get_commit(self, revision="", n=1, short_sha1=False) -> Tuple:
+    def get_commit(self, revision="", n=1, short_sha1=False, cwd=None) -> Tuple:
         """
         Return:
             (sha1, author, isotime, message,)
@@ -92,7 +99,7 @@ class Updater(DeployConfig, GitManager, PipManager):
         ph = "h" if short_sha1 else "H"
 
         log = self.execute_output(
-            f'"{self.git}" log {revision} --pretty=format:"%{ph}---%an---%ad---%s" --date=iso -{n}'
+            f'"{self.git}" log {revision} --pretty=format:"%{ph}---%an---%ad---%s" --date=iso -{n}', cwd=cwd
         )
 
         if not log:
@@ -106,24 +113,61 @@ class Updater(DeployConfig, GitManager, PipManager):
         else:
             return logs
 
-    def _git_fetch(self, source) -> bool:
-        # Same command as execute() but with a hard timeout: os.system can
-        # hang for many minutes on unreachable networks, leaving the updater
-        # stuck in the "checking" state.
-        command = f'"{self.git}" fetch {source} {self.Branch}'
-        command = command.replace(r"\\", "/").replace("\\", "/").replace('"', '"')
-        logger.info(command)
+    @property
+    def history_directory(self):
+        return Path(self.root_filepath) / 'tmp' / 'git-history'
+
+    def refresh_git_history(self):
+        directory = self.history_directory
+        directory.mkdir(parents=True, exist_ok=True)
+        remote = self.execute_output(f'"{self.git}" remote get-url origin', cwd=self.root_filepath).strip()
+        if not remote:
+            return False
+        if not (directory / 'HEAD').is_file():
+            subprocess.run([self.git, 'init', '--bare', str(directory)],
+                           capture_output=True, check=True, timeout=10)
+        subprocess.run([self.git, '-C', str(directory), 'config', 'remote.origin.url', remote],
+                       capture_output=True, check=True, timeout=10)
+        # Keep partial Git objects separate so Mirror updates never lazily download source files from Git.
+        return self._git_fetch('origin', depth=20, timeout=20, cwd=directory, filter_spec='tree:0')
+
+    def _git_fetch(self, source, depth=None, timeout=120, cwd=None, filter_spec=None) -> bool:
+        command = [self.git, 'fetch']
+        if depth:
+            command.append(f'--depth={depth}')
+        if filter_spec:
+            command.append(f'--filter={filter_spec}')
+        command.extend([source, f'+refs/heads/{self.Branch}:refs/remotes/{source}/{self.Branch}'])
+        logger.info(subprocess.list2cmdline(command))
         try:
-            result = subprocess.run(command, shell=True, capture_output=True, timeout=120)
-        except subprocess.TimeoutExpired:
-            logger.warning("Git fetch timed out after 120s")
-            self._fetch_error = 'git fetch timed out after 120s'
+            with subprocess.Popen(command, cwd=cwd or self.root_filepath, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, start_new_session=os.name != 'nt') as process:
+                try:
+                    _, stderr = process.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    # Killing only the launcher leaves Git children holding the captured pipes open on Windows.
+                    if os.name == 'nt':
+                        subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                                       capture_output=True, timeout=10)
+                    else:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    process.kill()
+                    process.communicate(timeout=5)
+                    logger.warning(f'Git fetch timed out after {timeout}s')
+                    self._fetch_error = f'git fetch timed out after {timeout}s'
+                    return False
+                if process.returncode:
+                    logger.info(f'[ allowed failure ], error_code: {process.returncode}')
+                    self._fetch_error = self.git_error_message('fetch', _decode_output(stderr))
+                    return False
+        except OSError as error:
+            logger.warning(f'Unable to fetch Git history ({type(error).__name__})')
+            self._fetch_error = f'Unable to run git: {type(error).__name__}'
             return False
-        if result.returncode:
-            logger.info(f"[ allowed failure ], error_code: {result.returncode}")
-            self._fetch_error = self.git_error_message('fetch', _decode_output(result.stderr))
-            return False
-        logger.info("[ success ]")
+        logger.info('[ success ]')
         return True
 
     def _check_update(self) -> bool:
@@ -137,13 +181,40 @@ class Updater(DeployConfig, GitManager, PipManager):
         try:
             return self._do_check_update()
         except Exception as e:
-            logger.exception(e)
-            logger.warning("Check update failed")
+            if isinstance(e, MirrorError):
+                self.check_error = str(e)
+                logger.warning(self.check_error)
+            elif self.UpdateSource == 'mirrorchyan':
+                # The project formatter captures frame locals. Mirror HTTP
+                # frames contain the CDK and signed URL, so never log them.
+                self.check_error = f'Mirror源码检查异常（{type(e).__name__}），请检查配置或稍后重试。'
+                logger.warning(self.check_error)
+            else:
+                logger.exception(e)
+                logger.warning("Check update failed")
+                self.check_error = str(e) or e.__class__.__name__
             self.state = "failed"
-            self.check_error = str(e) or e.__class__.__name__
             return False
 
     def _do_check_update(self) -> bool:
+        self.read()
+        self.source_info = {}
+        if self.UpdateSource == 'mirrorchyan':
+            local, data = self.mirror_updater().check()
+            self.source_info = {
+                'source': 'mirrorchyan', 'local_version': local, 'remote_version': data['version_name'],
+                'release_note': str(data.get('release_note') or ''), 'needs_cdk': not bool(data.get('url')),
+            }
+            available = local != data['version_name']
+            logger.info(f"Mirror source: {local} -> {data['version_name']}, update available: {available}")
+            try:
+                fetched = self.refresh_git_history()
+            except (OSError, subprocess.SubprocessError) as error:
+                logger.warning(f'Unable to refresh Git history ({type(error).__name__})')
+                fetched = False
+            if not fetched:
+                logger.warning('Git history refresh failed; keep cached history and the Mirror update result')
+            return available
         if State.deploy_config.GitOverCdn:
             status = self.goc_client.get_status()
             if status == "uptodate":
@@ -179,10 +250,11 @@ class Updater(DeployConfig, GitManager, PipManager):
         if self.merge_mode:
             return self._check_merge_update(f"{source}/{self.Branch}")
 
-        sha1, _, _, message = self.get_commit(f"..{source}/{self.Branch}")
+        local_sha, _, _, _ = self.get_commit()
+        sha1, _, _, message = self.get_commit(f"{source}/{self.Branch}")
 
-        if sha1:
-            logger.info(f"New update available")
+        if sha1 and local_sha != sha1:
+            logger.info(f"Update available")
             logger.info(f"{sha1[:8]} - {message}")
             return True
         else:
@@ -283,6 +355,14 @@ class Updater(DeployConfig, GitManager, PipManager):
         return 1
 
     def check_update(self):
+        if not self._operation_lock.acquire(blocking=False):
+            return
+        try:
+            self._check_update_locked()
+        finally:
+            self._operation_lock.release()
+
+    def _check_update_locked(self):
         if self.state == "checking":
             # Escape hatch for a wedged check (e.g. the thread was killed
             # mid-fetch): allow a retry after 10 minutes instead of blocking
@@ -300,6 +380,9 @@ class Updater(DeployConfig, GitManager, PipManager):
             self.state = result
 
     def git_update(self, allow_merge=True, fetch=None):
+        self.read()
+        if self.UpdateSource == 'mirrorchyan':
+            return super().git_update()
         # A refused merge is deterministic, so only other failures are retried.
         fetch = not self._update_checked if fetch is None else fetch
         for attempt in range(3):
@@ -319,16 +402,30 @@ class Updater(DeployConfig, GitManager, PipManager):
 
     def update(self):
         logger.hr("Run update")
+        self.update_error = ''
         self.check_error = ''
+        self.recovery_failed = False
         try:
             self.git_update()
+            self.invalidate_dependency_cache()
             self.pip_install()
-        except MergeBlocked as e:
-            # Surfaced on the update page, so a refused merge says which files conflict.
-            # Other failures keep check_error empty so the page offers a retry.
-            self.check_error = str(e)
-            return False
-        except ExecutionError:
+            self.mirror_updater().ready()
+            if State.restart_event is not None:
+                self.mirror_updater().prepare_launch()
+        except (ExecutionError, OSError, ValueError) as error:
+            self.update_error = str(error)
+            if isinstance(error, MergeBlocked):
+                # Surfaced on the update page, so a refused merge says which files conflict.
+                self.check_error = self.update_error
+            logger.warning(self.update_error)
+            try:
+                self.mirror_updater().rollback()
+                self.invalidate_dependency_cache()
+            except (ExecutionError, OSError, ValueError) as recovery_error:
+                self.recovery_failed = True
+                self.update_error += f' 恢复失败：{recovery_error}'
+                logger.error(self.update_error)
+                self.mirror_updater().release()
             return False
         finally:
             # The fetched ref has been consumed; a later update must fetch again.
@@ -338,9 +435,20 @@ class Updater(DeployConfig, GitManager, PipManager):
     def run_update(self):
         if self.state not in ("failed", 0, 1):
             return
-        self._start_update()
+        if not self._operation_lock.acquire(blocking=False):
+            return
+        try:
+            self._start_update()
+        finally:
+            self._operation_lock.release()
 
     def _start_update(self):
+        try:
+            self.mirror_updater().acquire()
+        except ExecutionError as error:
+            self.state = 'failed'
+            self.update_error = str(error)
+            return
         self.state = "start"
         instances = ProcessManager.running_instances()
         names = []
@@ -366,6 +474,7 @@ class Updater(DeployConfig, GitManager, PipManager):
             if self.state == "cancel":
                 self.state = 1
                 self.event.clear()
+                self.mirror_updater().release()
                 ProcessManager.restart_processes(instances, self.event)
                 return
             time.sleep(0.25)
@@ -394,8 +503,11 @@ class Updater(DeployConfig, GitManager, PipManager):
         else:
             self.state = "failed"
             logger.warning("Update failed")
-            self.event.clear()
-            ProcessManager.restart_processes(instances, self.event)
+            if not self.recovery_failed:
+                self.event.clear()
+                ProcessManager.restart_processes(instances, self.event)
+            else:
+                logger.error('Instance restart blocked because source recovery failed')
             return False
 
     @staticmethod
@@ -419,7 +531,7 @@ class Updater(DeployConfig, GitManager, PipManager):
         yield
         while True:
             self.check_update()
-            if self.state != 1:
+            if self.state != 1 or self.UpdateSource == 'mirrorchyan' and self.source_info.get('needs_cdk'):
                 th._task.delay = get_next_time(self.schedule_time)
                 yield
                 continue
