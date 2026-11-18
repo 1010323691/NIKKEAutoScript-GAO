@@ -6,8 +6,8 @@ from module.base.utils import point2str
 from module.logger import logger
 from module.ocr.ocr import Ocr
 from module.outpost.assets import *
-from module.ui.assets import COMMISSION_CHECK
-from module.ui.page import page_commission
+from module.ui.assets import COMMISSION_CHECK, OUTPOST_GOTO_COMMISSION
+from module.ui.page import page_commission, page_outpost
 from module.ui.ui import UI
 
 
@@ -59,9 +59,24 @@ class Commission(UI):
         logger.hr('Receive commission', 2)
         confirm_timer = Timer(3, count=5)
         click_timer = Timer(0.3)
+        outpost_timer = Timer(3, count=3)
 
         while 1:
             self.device.screenshot()
+
+            # 打开委托页有约3秒的镜头动画，期间页面检测仍是前哨基地，ui_goto 会补第二次点击，
+            # 该点击落在弹窗外把窗口关掉，所以这里只点一次再等动画结束
+            if self.ui_page_appear(page_outpost):
+                if not outpost_timer.started():
+                    outpost_timer.start()
+                if outpost_timer.reached():
+                    logger.warning('Fell back to outpost during receive commission, re-enter commission page')
+                    outpost_timer.clear()
+                    self.appear_then_click(OUTPOST_GOTO_COMMISSION)
+                    self.device.sleep(5)
+                    continue
+            else:
+                outpost_timer.clear()
 
             if self.handle_reward(interval=1):
                 click_timer.reset()

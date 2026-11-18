@@ -17,11 +17,12 @@ from module.ui.ui import UI
 class MissionPass(UI):
     @staticmethod
     def _pass_tab_red(image, area) -> bool:
-        r, g, _ = get_color(image, area)
-        return r > g + 60
+        # 选中页签的填充色随赛季主题变化（红/蓝），未选中页签接近灰白，所以只看色差
+        color = get_color(image, area)
+        return max(color) - min(color) > 40
 
     def pass_reward_tab_selected(self) -> bool:
-        # 选中的页签是红色胶囊；奖励可领取时页签文字上叠着动态光效，OCR 经常读不出“普通奖励”
+        # 选中的页签是有色胶囊；奖励可领取时页签文字上叠着动态光效，OCR 经常读不出“普通奖励”
         if self._pass_tab_red(self.device.image, (70, 405, 100, 430)):
             return True
         return self.appear_text(Langs.PASS_REWARD_TAB, threshold=1)
