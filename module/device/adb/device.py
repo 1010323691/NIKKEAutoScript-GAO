@@ -17,6 +17,7 @@ from module.exception import (
     EmulatorNotRunningError,
     GameNotRunningError,
     GameStuckError,
+    GameTaskRestart,
     GameTooManyClickError,
     RequestHumanTakeover,
 )
@@ -35,6 +36,9 @@ class Device(ClickResponse, Screenshot, Control, AppControl, ScreenUnlock):
     # 操作计时器
     stuck_timer = Timer(360, count=60).start()
     stuck_timer_long = Timer(480, count=180).start()
+    stuck_check_minute = 0
+    stuck_recovery_active = False
+    stuck_recovery_handled = False
     """ 
         如果 detect_record 含有在 stuck_long_wait_list 中的 Button，在 stuck_timer_long 到达上限前不会 raise exception
         detect_record 值为 str(Button)，在 Button 类中，重写为该 asset 的名称
@@ -257,23 +261,24 @@ class Device(ClickResponse, Screenshot, Control, AppControl, ScreenUnlock):
             Returns:
                 np.ndarray:
         """
-        self.stuck_record_check()
-        super().screenshot()
-        source = {
-            'serial': self.serial,
-            'display_id': self._virtual_display_id or 0,
-        }
-        if self._virtual_display_id is not None and self._virtual_capture_port is not None:
-            # Lets the Web UI sample the bridge directly while this process is busy (e.g. long OCR).
-            source['virtual_display'] = {
-                'port': self._virtual_capture_port,
-                'rotation': self._virtual_display_rotation,
-                'width': self._virtual_display_width,
-                'height': self._virtual_display_height,
+        while 1:
+            super().screenshot()
+            source = {
+                'serial': self.serial,
+                'display_id': self._virtual_display_id or 0,
             }
-        publish_preview_frame(self.image, source=source)
-        self.click_response_check()
-        return self.image
+            if self._virtual_display_id is not None and self._virtual_capture_port is not None:
+                # Lets the Web UI sample the bridge directly while this process is busy (e.g. long OCR).
+                source['virtual_display'] = {
+                    'port': self._virtual_capture_port,
+                    'rotation': self._virtual_display_rotation,
+                    'width': self._virtual_display_width,
+                    'height': self._virtual_display_height,
+                }
+            publish_preview_frame(self.image, source=source)
+            if not self.stuck_record_check():
+                self.click_response_check()
+                return self.image
 
     def click(self, button: Button, click_offset=0, control_check=True, random_offset=None):
         super().click(button, click_offset=click_offset, control_check=control_check, random_offset=random_offset)
@@ -282,12 +287,13 @@ class Device(ClickResponse, Screenshot, Control, AppControl, ScreenUnlock):
 
     def handle_control_check(self, button: Button):
         """
-            当点击(匹配到)Button时，清空尝试匹配过的按钮，重置操作计时器，并记录此Button，再检查点击过的Buttons
+        记录点击并检查重复点击；普通点击清空卡死记录，恢复过程中的点击保留卡死计时。
 
-            Args:
-                button: Button
+        Args:
+            button: Button
         """
-        self.stuck_record_clear()
+        if not self.stuck_recovery_active:
+            self.stuck_record_clear()
         self.click_record_add(button)
         self.click_record_check()
 
@@ -350,9 +356,20 @@ class Device(ClickResponse, Screenshot, Control, AppControl, ScreenUnlock):
             如果 detect_record 含有在 stuck_long_wait_list 中的 Button，在 stuck_timer_long 到达上限前不会 raise exception
             detect_record 值为 str(Button)，在 Button 类中，默认重写为该 asset 的名称
 
+            Returns:
+                bool: 已处理当前画面时返回 True，调用方应重新截图。
+
             Raises:
                 GameStuckError:
         """
+        if self.stuck_recovery_active:
+            return False
+
+        from module.handler.info_handle import InfoHandler
+
+        if InfoHandler.handle_stuck(self):
+            return True
+
         reached = self.stuck_timer.reached()
         reached_long = self.stuck_timer_long.reached()
 
@@ -365,15 +382,14 @@ class Device(ClickResponse, Screenshot, Control, AppControl, ScreenUnlock):
 
         logger.warning('Wait too long')
         logger.warning(f'Waiting for {self.detect_record}')
+        recovery_handled = self.stuck_recovery_handled
         self.stuck_record_clear()
 
-        from module.handler.info_handle import InfoHandler
-        InfoHandler(self.config, device=self).handle_system_error()
-
-        if self.app_is_running():
-            raise GameStuckError('Wait too long')
-        else:
+        if not self.app_is_running():
             raise GameNotRunningError('Game died')
+        if recovery_handled:
+            raise GameTaskRestart('Task made no progress after stuck recovery')
+        raise GameStuckError('Wait too long')
 
     def stuck_record_clear(self):
         """
@@ -382,6 +398,8 @@ class Device(ClickResponse, Screenshot, Control, AppControl, ScreenUnlock):
         self.detect_record = set()
         self.stuck_timer.reset()
         self.stuck_timer_long.reset()
+        self.stuck_check_minute = 0
+        self.stuck_recovery_handled = False
 
     def disable_stuck_detection(self):
         """

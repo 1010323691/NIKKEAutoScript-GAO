@@ -31,6 +31,10 @@ class GameClickNoResponseError(Exception):
     pass
 
 
+class GameTaskRestart(Exception):
+    pass
+
+
 class GameSystemError(Exception):
     pass
 

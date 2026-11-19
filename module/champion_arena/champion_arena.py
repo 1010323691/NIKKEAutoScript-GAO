@@ -151,7 +151,7 @@ class ChampionArena(UI, ArenaBase):
                 self.appear(ARENA_NEXT_SEASON, offset=(30, 30))
                 or self.appear(PROGRESS_NEXT_SEASON, offset=(30, 30))
                 or self.appear(PROGRESS_SEASON_INTERVAL, offset=(30, 30))
-                or self.appear(PROGRESS_TEAM, offset=(30, 30))
+                or self.appear_any([PROGRESS_TEAM, PROGRESS_TEAM_EDIT], offset=(30, 30))
                 or self.appear(PROGRESS_FIGHTING, offset=(30, 30))
                 or self.appear(PROGRESS_RESULTING, offset=(30, 30))
                 or self.appear(PROGRESS_END, offset=(30, 30))

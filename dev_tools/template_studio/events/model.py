@@ -11,8 +11,6 @@ import os
 import re
 import shutil
 import tempfile
-from pprint import pformat
-from textwrap import indent
 
 import cv2
 import numpy as np
@@ -97,7 +95,12 @@ def create_event_session(event_id, event_name, base_event_id, position, phase, r
                  'story_schedule': None}
         lines = source.splitlines(keepends=True)
         insertion = node.elts[position - 1].lineno - 1 if len(node.elts) >= position else node.end_lineno - 1
-        lines.insert(insertion, indent(pformat(event, width=100, sort_dicts=False), '    ') + ',\n')
+        event_lines = ['    {\n']
+        for key, value in event.items():
+            literal = json.dumps(value, ensure_ascii=False) if isinstance(value, str) else repr(value)
+            event_lines.append(f'        "{key}": {literal},\n')
+        event_lines.append('    },\n')
+        lines.insert(insertion, ''.join(event_lines))
         updated_source = ''.join(lines)
         ast.parse(updated_source)
         created = []
@@ -660,6 +663,7 @@ def export_session(session, rules, out_root=None, run_extract=None, allow_partia
     Args:
         out_root: 覆盖输出目录（默认 assets/zh-CN/event_dated/<event_id>，测试用）
         run_extract: 是否跑 button_extract 重新生成 assets.py（默认仅在 out_root 为 None 时）
+        allow_partial: 是否允许仍有必需模板未确认时导出
 
     Returns:
         dict: exported(名单), missing(未确认清单), out_dir
