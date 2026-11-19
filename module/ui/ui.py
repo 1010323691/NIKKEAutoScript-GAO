@@ -292,7 +292,9 @@ class UI(InfoHandler):
                 if not page.parent or not page.check_button:
                     continue
 
-                if self.ui_page_appear(page, offset=offset, interval=2):
+                # 页面切换偶尔超过 2s，补点会落到目标页的同位置按钮上（如底栏页签再点一次回大厅、
+                # 派遣窗口外侧点击关闭），把刚打开的页面关掉，所以重试间隔保持 4s
+                if self.ui_page_appear(page, offset=offset, interval=4):
                     logger.info(f'Page switch: {page} -> {page.parent}')
                     button = page.links[page.parent]
                     self.device.click(button)

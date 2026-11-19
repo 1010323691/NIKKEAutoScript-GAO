@@ -70,7 +70,8 @@ class Reward(UI):
                 confirm_timer.reset()
                 continue
 
-            if self.appear_then_click(CONFIRM_B, offset=(30, 30), interval=1, static=False):
+            # 全屏搜索会把好友页底部深底蓝字的“好友管理”按钮当成确认按钮，点开好友管理弹窗后后续任务无法识别页面
+            if self.appear_then_click(CONFIRM_B, offset=(30, 30), interval=1):
                 confirm_timer.reset()
                 continue
 
